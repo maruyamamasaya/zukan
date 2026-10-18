@@ -108,8 +108,8 @@ final class CloudOIDC: NSObject, ObservableObject, CloudAccessTokenProvider, ASW
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first(where: \.isKeyWindow) ?? ASPresentationAnchor()
     }
-    func login(organizationSync: Bool = false) async {
-        guard !working else { return }; working = true; defer { working = false }
+    @discardableResult func login(organizationSync: Bool = false) async -> Bool {
+        guard !working else { return false }; working = true; defer { working = false }
         do {
             let verifier = try oidcRandom(), state = try oidcRandom()
             var url = URLComponents(url: config.domain.appendingPathComponent("oauth2/authorize"), resolvingAgainstBaseURL: false)!
@@ -127,8 +127,9 @@ final class CloudOIDC: NSObject, ObservableObject, CloudAccessTokenProvider, ASW
             generation = UUID(); refreshTask?.cancel(); refreshTask = nil
             try keychain.write(value); tokens = value; subject = value.subject; message = nil
             rememberNamespace()
-            loginRevision += 1
-        } catch { message = "ログインできませんでした。認証と接続設定を確認してください。" }
+            if !organizationSync { loginRevision += 1 }
+            return true
+        } catch { message = "ログインできませんでした。認証と接続設定を確認してください。"; return false }
     }
     private func post(_ path: String, values: [String: String]) async throws -> Data {
         var request = URLRequest(url: config.domain.appendingPathComponent(path)); request.httpMethod = "POST"

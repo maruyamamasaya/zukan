@@ -99,3 +99,5 @@ Phase 11B-3：実Cognito設定・S3公開ブロックを読取確認。本人登
 テスト本棚の同期に全端末合計5回/時・待ち時刻・同意した1回だけ追加を接続。上限中の編集を保持し、再起動/切断/管理復元で台帳をリセットしない。64テストとSimulator実画面を確認。AWS/本番/実機未変更。[仕様](docs/local-sync-ui.md)。
 
 認証付き整理同期HTTPS（2026-10-18、テストのみ）：既存CloudOIDC/Keychainから同じ利用者のBearerを提供し、必要時の専用scopeログインとsilent refreshを追加。共通bootstrap/50操作＋実JSONバイト上限/部分ACK後の永続再送を、明示的なSimulatorテスト本棚への接続注入で利用する。通常起動/既存ログイン/実機/AWSは未変更。[仕様](docs/local-sync-ui.md)。
+
+2026-10-18：整理同期の準備画面を追加。既存CloudOIDCで追加scopeのログイン成功後にバックアップ/統合確認へ進む導線を実装。Bundleの明示有効化がない現行ビルドは準備中・通信なし。追加scope取得時は画面を再生成せず、失敗/キャンセルでは古いtokenで接続しない。Simulator66テスト合格、CUAは接続timeoutで新画面未操作。実機/AWS/既存本棚は未変更。[詳細](docs/local-sync-ui.md)。

@@ -24,8 +24,8 @@ final class CloudLibraryStore: ObservableObject {
     private let api: any CloudLibraryAPI
     private var pendingDetails: [String: Task<CloudDetail, Error>] = [:]
     private let files: CloudFileStore
-    private let enableTestSync: Bool
-    private let syncConnection: AuthenticatedSyncConnection?
+    private var enableTestSync: Bool
+    private var syncConnection: AuthenticatedSyncConnection?
     private var testSync: SyncLabSession?
     init(api: any CloudLibraryAPI = MockCloudAPI(), files: CloudFileStore, enableTestSync: Bool = false, syncConnection: AuthenticatedSyncConnection? = nil) { self.syncConnection = syncConnection; self.api = api; self.files = files; self.enableTestSync = enableTestSync }
     func loadNextPage(cursor: String) async {
@@ -78,6 +78,12 @@ final class CloudLibraryStore: ObservableObject {
                 } else { errorMessage = message(error) }
             } catch { errorMessage = message(error) }
         }
+    }
+    func connectOrganizationSync(_ connection: AuthenticatedSyncConnection) async throws -> SyncLabSession {
+        guard Bundle.main.object(forInfoDictionaryKey: "OrganizationSyncEnabled") as? Bool == true else { throw OrganizationConnectionError.authentication }
+        if let testSync { return testSync }
+        self.syncConnection = connection; self.enableTestSync = true
+        return await makeSyncLab()
     }
     func makeSyncLab() async -> SyncLabSession {
         if enableTestSync {

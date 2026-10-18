@@ -42,3 +42,11 @@ CloudOIDC.organizationSyncConnectionは既存Keychainの同じ利用者からBea
 CloudLibraryView/StoreにsyncConnectionを明示注入し、enableTestSyncの隔離本棚だけへ渡す。production/既定起動へは接続しない。共有SyncLabSessionはbootstrapの固定UUIDとアカウントを記録し、50件/256KiB（小さい交渉上限にも対応）で分割。途中失敗は確認済み分だけ確定し、未確認の操作ID/送信待ち/待機を保持して再送する。
 
 iOS XCTestは旧機能を含む66件。既存OIDC→Bearer/bootstrapと日本語JSONのバイト分割をURLProtocolで確認し、通常本棚へ接続しないことも検査する。共通層のMac実行バイナリでは、ローカルTLSの125フォルダ初回統合/途中ACK喪失/待機と再起動/両方向反映を確認。実iPhoneのTLSや新しいログイン画面の操作を確認済みとは扱わない。詳細と再現コマンドは隣接diagram-design-systemのdocs/organization-sync-https.mdを正とする。AWS/実機/既存資料/保存済み資料は変更していない。
+
+## 2026-10-18 接続準備画面（未有効化）
+
+その他メニューの「整理情報の同期」から共有SyncSetupViewを開く。管理JSONだけの自動バックアップ/統合件数/競合/復元の説明を表示。現行BundleはOrganizationSyncEnabledを持たず、ボタン無効・外部通信なし。将来の承認済みビルドでBoolean trueを固定し、既存CloudOIDCにorganization.syncのscopeを許可した場合だけ、明示ログイン→既存CloudLibraryStoreの通常管理binding→初回確認へ進む。
+
+login(organizationSync:true)の失敗/キャンセルをBoolで通知して停止する。追加scope取得時にloginRevisionでシートを破棄しない。従来の通常再ログインの再構築は維持する。テスト専用注入/Simulatorの検証メニューは従来どおり。
+
+最終Simulator66 XCTest合格。署名ビルド成功。専用CUAからSimulatorの取得を2回試みたがtimeoutReachedで新画面の実操作は未確認。AppleScript等の代替操作なし。実Cognito/公開同期/実iPhone配布なし。AWS構成案・料金・実適用前のライブ差分と段階的有効化は隣接diagram-design-system/docs/organization-sync-readiness.mdを参照。

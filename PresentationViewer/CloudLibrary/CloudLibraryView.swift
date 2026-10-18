@@ -26,6 +26,8 @@ struct CloudLibraryView: View {
     @State private var showFolderDialog = false
     @State private var moving = false
     @State private var syncLab: SyncLabSession?
+    @State private var syncSetup = false
+    private let onSyncLogin: (() async throws -> AuthenticatedSyncConnection)?
     @State private var selectedGroup = "すべて"
     @State private var selectedTag = ""
     @State private var classificationDraft: CloudDiagram?
@@ -48,7 +50,8 @@ struct CloudLibraryView: View {
     let onReauthenticate: (() -> Void)?
     let production: Bool
     let kind: CloudLibraryKind
-    init(files: CloudFileStore, kind: CloudLibraryKind = .presentations, api: any CloudLibraryAPI = MockCloudAPI(), production: Bool = false, onSettings: (() -> Void)? = nil, onLogout: (() -> Void)? = nil, onReauthenticate: (() -> Void)? = nil, syncConnection: AuthenticatedSyncConnection? = nil) {
+    init(files: CloudFileStore, kind: CloudLibraryKind = .presentations, api: any CloudLibraryAPI = MockCloudAPI(), production: Bool = false, onSettings: (() -> Void)? = nil, onLogout: (() -> Void)? = nil, onReauthenticate: (() -> Void)? = nil, syncConnection: AuthenticatedSyncConnection? = nil, onSyncLogin: (() async throws -> AuthenticatedSyncConnection)? = nil) {
+        self.onSyncLogin = onSyncLogin
         self.costFiles = files
         self.kind = kind
         self.api = api
@@ -257,6 +260,10 @@ struct CloudLibraryView: View {
             Text("保存済み資料と一時キャッシュを両ライブラリから削除します。S3の正本、ローカル資料タブのファイル、フォルダ・まとめ・非表示・グループ・タグの設定は残ります。再取得には通信が必要です。")
         }
         .sheet(item: $syncLab) { SyncLabView(session: $0) }
+        .sheet(isPresented: $syncSetup) { SyncSetupView(available: production && onSyncLogin != nil && Bundle.main.object(forInfoDictionaryKey: "OrganizationSyncEnabled") as? Bool == true) {
+            guard let onSyncLogin else { throw OrganizationConnectionError.authentication }
+            return try await store.connectOrganizationSync(onSyncLogin())
+        } }
         .sheet(item: $classificationDraft) { diagram in
             LibraryClassificationEditor(diagram: diagram, store: store)
         }
@@ -373,6 +380,7 @@ struct CloudLibraryView: View {
             && (selectedTag.isEmpty || value.tags.contains { $0.localizedCaseInsensitiveCompare(selectedTag) == .orderedSame })
     }
     @ViewBuilder private var libraryActions: some View {
+                    Button("整理情報の同期", systemImage: "icloud") { syncSetup = true }
                     Button("同期の検証", systemImage: "arrow.triangle.2.circlepath") { Task { syncLab = await store.makeSyncLab() } }
                     Button(showHidden ? "資料一覧に戻る" : "非表示の資料", systemImage: showHidden ? "doc.richtext" : "eye.slash") { showHidden.toggle() }
                     if kind == .illustrations && !showHidden {
