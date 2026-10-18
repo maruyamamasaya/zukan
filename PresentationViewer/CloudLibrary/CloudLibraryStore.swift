@@ -24,10 +24,14 @@ final class CloudLibraryStore: ObservableObject {
     private let api: any CloudLibraryAPI
     private var pendingDetails: [String: Task<CloudDetail, Error>] = [:]
     private let files: CloudFileStore
+    private final class WeakStore { weak var value: CloudLibraryStore?; init(_ value: CloudLibraryStore) { self.value = value } }
+    private static var liveStores: [WeakStore] = []
+    private static var productionSessions: [URL: SyncLabSession] = [:]
+    private var productionSync = false
     private var enableTestSync: Bool
     private var syncConnection: AuthenticatedSyncConnection?
     private var testSync: SyncLabSession?
-    init(api: any CloudLibraryAPI = MockCloudAPI(), files: CloudFileStore, enableTestSync: Bool = false, syncConnection: AuthenticatedSyncConnection? = nil) { self.syncConnection = syncConnection; self.api = api; self.files = files; self.enableTestSync = enableTestSync }
+    init(api: any CloudLibraryAPI = MockCloudAPI(), files: CloudFileStore, enableTestSync: Bool = false, syncConnection: AuthenticatedSyncConnection? = nil) { self.syncConnection = syncConnection; self.api = api; self.files = files; self.enableTestSync = enableTestSync; Self.liveStores.removeAll { $0.value == nil }; Self.liveStores.append(WeakStore(self)) }
     func loadNextPage(cursor: String) async {
         while refreshing {
             do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
@@ -79,11 +83,43 @@ final class CloudLibraryStore: ObservableObject {
             } catch { errorMessage = message(error) }
         }
     }
+    private static func refreshProductionStores(_ directory: URL) async throws {
+        for reference in liveStores {
+            guard let store = reference.value, await store.files.organizationSyncDirectory() == directory else { continue }
+            store.organization = try await store.files.organization()
+            store.classifications = try await store.files.classifications()
+            store.collections = try await store.files.collections()
+        }
+    }
     func connectOrganizationSync(_ connection: AuthenticatedSyncConnection) async throws -> SyncLabSession {
         guard Bundle.main.object(forInfoDictionaryKey: "OrganizationSyncEnabled") as? Bool == true else { throw OrganizationConnectionError.authentication }
-        if let testSync { return testSync }
-        self.syncConnection = connection; self.enableTestSync = true
-        return await makeSyncLab()
+        let directory = await files.organizationSyncDirectory()
+        if let existing = Self.productionSessions[directory] {
+            guard existing.httpsConnection?.identityKey == connection.identityKey else { throw OrganizationConnectionError.accountChanged }
+            testSync = existing; productionSync = true; enableTestSync = true
+            return existing
+        }
+        let files = self.files
+        let binding = TestLibrarySyncBinding(read: {
+            let value = try await files.testLibrarySyncSource()
+            return try JSONDecoder().decode(OrganizationState<OrganizationDocument>.self, from: JSONEncoder().encode(value))
+        }, apply: { state in
+            let value = try JSONDecoder().decode(OrganizationState<CloudDiagram>.self, from: JSONEncoder().encode(state))
+            try await files.applyTestLibrarySync(value)
+            try await Self.refreshProductionStores(directory)
+        }, backup: { try await files.managementBackup() }, restore: { data in
+            try await files.restoreManagementBackup(data)
+            try await Self.refreshProductionStores(directory)
+        })
+        let seed = try await binding.read()
+        let documents = items.map { OrganizationDocument(id:$0.id,title:$0.title,type:$0.type,version:$0.version,formats:$0.formats.map(\.rawValue),pageCount:$0.pageCount,tags:$0.tags) }
+        let session = SyncLabSession(directory: directory, seed: seed, documents: documents, binding: binding, rateLimited: true, connection: connection)
+        Self.productionSessions[directory] = session
+        for reference in Self.liveStores {
+            guard let store = reference.value, await store.files.organizationSyncDirectory() == directory else { continue }
+            store.testSync = session; store.productionSync = true; store.enableTestSync = true
+        }
+        return session
     }
     func makeSyncLab() async -> SyncLabSession {
         if enableTestSync {
@@ -107,7 +143,7 @@ final class CloudLibraryStore: ObservableObject {
             })
             let seed = (try? await binding.read()) ?? OrganizationState<OrganizationDocument>()
             let documents = items.map { OrganizationDocument(id: $0.id, title: $0.title, type: $0.type, version: $0.version, formats: $0.formats.map(\.rawValue), pageCount: $0.pageCount, tags: $0.tags) }
-            let session = SyncLabSession(directory: await files.testLibrarySyncDirectory(), seed: seed, documents: documents, binding: binding, rateLimited: true, connection: syncConnection)
+            let session = SyncLabSession(directory: await (productionSync ? files.organizationSyncDirectory() : files.testLibrarySyncDirectory()), seed: seed, documents: documents, binding: binding, rateLimited: true, connection: syncConnection)
             testSync = session; return session
         }
         await reloadSaved()

@@ -50,3 +50,13 @@ iOS XCTestは旧機能を含む66件。既存OIDC→Bearer/bootstrapと日本語
 login(organizationSync:true)の失敗/キャンセルをBoolで通知して停止する。追加scope取得時にloginRevisionでシートを破棄しない。従来の通常再ログインの再構築は維持する。テスト専用注入/Simulatorの検証メニューは従来どおり。
 
 最終Simulator66 XCTest合格。署名ビルド成功。専用CUAからSimulatorの取得を2回試みたがtimeoutReachedで新画面の実操作は未確認。AppleScript等の代替操作なし。実Cognito/公開同期/実iPhone配布なし。AWS構成案・料金・実適用前のライブ差分と段階的有効化は隣接diagram-design-system/docs/organization-sync-readiness.mdを参照。
+
+## 通常実機の接続（2026-10-18）
+
+本人の通常本棚接続依頼を受け、Info.plistのOrganizationSyncEnabledをtrueにした更新版をVesperaへ上書きインストール。アンインストールせず既存資料を保持する。以前の無効・テスト限定は過去ビルドの条件。
+
+既存認証で整理同期用scopeのログインを行い、同期画面で管理JSONの自動バックアップ→初回統合件数と競合の確認→確認した情報を送信待ち→手動同期する。資料本体・キャッシュ・フォルダ画像は送信しない。接続は利用者別管理領域のorganization-syncへ永続化し、test-library-syncと分離する。通常画面での編集は送信待ちへ入り、自動背景同期は行わない。全端末合計5回/時、失敗後は画面の待機時刻に従う。復元は同期画面から同期停止と管理データ復元を選び、サーバーを削除しない。
+
+2つのクラウド画面は管理領域ごとの同一SyncLabSessionを共有し、受信/復元後に両画面のフォルダ・分類・まとめを再読込する。共有HTTPS接続の要求開始を1.1秒ずつ空け、既存APIの1request/secに合わせる。
+
+Simulator67テスト（同一領域の2画面のキュー共有・準備時JSON不変を含む）と実機署名build/codesign合格。更新前後の実機classifications.json/collections.jsonはバイト一致。既存分類1、自由タグ0、まとめ2・18資料参照を確認。Macの先行初回同期は追加3件/変更解除競合0で成功。本人承認のミラーリング設定/端末ロック解除/実ログイン後、2026-10-19 0:01にiPhone受信追加3/送信追加3・変更解除競合0を確認して同期。両端末版9/待ち0/競合0を確認。Macフォルダ1/所属1/順序1がiPhoneへ、iPhone分類1/まとめ2・18参照がMacへ反映され、最終的に両端末の管理値は構造一致。既存iPhone分類/まとめは元と構造一致し、自動バックアップ内2JSONは元ファイルとバイト一致。AWS構成や資料本体を変更していない。

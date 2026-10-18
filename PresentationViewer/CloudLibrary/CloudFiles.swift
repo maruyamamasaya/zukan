@@ -36,6 +36,7 @@ actor CloudFileStore {
         return try CloudFileStore(saved: saved, cache: cache)
     }
     func syncLabDirectory() -> URL { saved.appendingPathComponent("sync-lab") }
+    func organizationSyncDirectory() -> URL { saved.appendingPathComponent("organization-sync") }
     func testLibrarySyncDirectory() -> URL { saved.appendingPathComponent("test-library-sync") }
     private let managementNames = ["organization.json", "classifications.json", "collections.json"]
     private var managementRestoreJournal: URL { saved.appendingPathComponent("management-restore.json") }

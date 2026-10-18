@@ -5,6 +5,20 @@ import LibraryOrganization
 @testable import PresentationViewer
 
 final class CloudLibraryTests: XCTestCase {
+    @MainActor func testProductionTabsShareOneQueueWithoutChangingManagement() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = try CloudFileStore(saved: root.appendingPathComponent("saved"), cache: root.appendingPathComponent("cache"))
+        let a = CloudLibraryStore(files: files), b = CloudLibraryStore(files: files)
+        let before = try await files.managementBackup()
+        let connection = try AuthenticatedSyncConnection(baseURL: URL(string:"https://api.example")!, issuer:"https://issuer.example", subject:"test-owner") { _ in throw OrganizationConnectionError.authentication }
+        let first = try await a.connectOrganizationSync(connection)
+        let second = try await b.connectOrganizationSync(connection)
+        XCTAssertTrue(first === second)
+        let after = try await files.managementBackup()
+        XCTAssertEqual(before, after)
+        XCTAssertFalse(first.connected)
+    }
     @MainActor func testIOSOIDCProvidesBearerForHTTPSBootstrapAndByteBoundedBatches() async throws {
         let config = CloudConnection(issuer: URL(string:"https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_Test")!,domain:URL(string:"https://test.auth.ap-northeast-1.amazoncognito.com")!,clientID:"isolated-sync-test",api:URL(string:"https://api.example")!,artifactHosts:["assets.example"],redirect:"presentationviewer://oauth/callback")
         let auth = try CloudOIDC(config:config,readTokens:{ CloudTokens(access:"test-bearer",refresh:"unused",expires:Date().addingTimeInterval(3600),subject:"test-owner") },readCachedNamespace:{ nil })
