@@ -161,27 +161,39 @@ final class CloudLibraryStore: ObservableObject {
         let documents = (items + localDiagrams + saved.map(\.diagram) + collections.flatMap(\.members)).map(document).filter { seen.insert($0.id).inserted }
         return SyncLabSession(directory: await files.syncLabDirectory(), seed: seed, documents: documents)
     }
-    func createFolder(_ name: String, parentID: UUID? = nil) async -> Bool {
+    func createFolder(_ name: String, parentID: UUID? = nil, shelf: LibraryShelf? = nil) async -> Bool {
         guard testSync?.blocksLibraryEdits != true else { errorMessage = "同期の確認・復元処理中です。同期画面で完了または解除してから編集してください。"; return false }
-        do { organization = try await files.createFolder(name: name, parentID: parentID); await testSync?.captureLibraryChanges(); return true }
+        do { organization = try await files.createFolder(name: name, parentID: parentID, shelf: shelf); await testSync?.captureLibraryChanges(); return true }
         catch { errorMessage = message(error); return false }
     }
-    func moveDocuments(_ ids: Set<String>, to folderID: UUID?) async -> Bool {
+    func moveDocuments(_ ids: Set<String>, to folderID: UUID?, scoped: Bool = false) async -> Bool {
         guard testSync?.blocksLibraryEdits != true else { errorMessage = "同期の確認・復元処理中です。同期画面で完了または解除してから編集してください。"; return false }
         let known = Set((items + localDiagrams + saved.map(\.diagram) + collections.flatMap(\.members)).map { $0.id.lowercased() })
         guard !ids.isEmpty, Set(ids.map { $0.lowercased() }).isSubset(of: known) else { errorMessage = CloudError.invalidResponse.errorDescription; return false }
-        do { organization = try await files.moveDocuments(ids, to: folderID); await testSync?.captureLibraryChanges(); return true }
+        do { organization = try await files.moveDocuments(ids, to: folderID, scoped: scoped); collections = try await files.collections(); await testSync?.captureLibraryChanges(); return true }
         catch { errorMessage = message(error); return false }
     }
-    func removeFolder(_ id: UUID) async -> Bool {
+    func removeFolder(_ id: UUID, scoped: Bool = false) async -> Bool {
         guard testSync?.blocksLibraryEdits != true else { errorMessage = "同期の確認・復元処理中です。同期画面で完了または解除してから編集してください。"; return false }
-        do { organization = try await files.removeOrganizationFolder(id); await testSync?.captureLibraryChanges(); return true }
+        do { organization = try await files.removeOrganizationFolder(id, scoped: scoped); collections = try await files.collections(); await testSync?.captureLibraryChanges(); return true }
+        catch { errorMessage = message(error); return false }
+    }
+    var integratedOrganization: OrganizationState<CloudDiagram> {
+        var value = organization; value.collections = collections
+        let documents = items + localDiagrams + saved.map(\.diagram) + collections.flatMap(\.members)
+        let kinds = Dictionary(documents.map { ($0.id.lowercased(), CloudLibraryKind.illustrations.contains($0)) }, uniquingKeysWith: { a, _ in a })
+        value.scopeLegacyFolders { kinds[$0.lowercased()] == true ? .illustration : .presentation }
+        return value
+    }
+    func renameFolder(_ id: UUID, name: String) async -> Bool {
+        guard testSync?.blocksLibraryEdits != true else { return false }
+        do { organization = try await files.renameOrganizationFolder(id, name: name); await testSync?.captureLibraryChanges(); return true }
         catch { errorMessage = message(error); return false }
     }
     func folderPath(_ id: UUID) -> String {
         var names: [String] = []; var next: UUID? = id; var seen = Set<UUID>()
-        while let current = next, seen.insert(current).inserted, let folder = organization.folders.first(where: { $0.id == current }) {
-            names.insert(folder.name, at: 0); next = folder.parentID
+        while let current = next, seen.insert(current).inserted, let folder = (organization.folders.first(where: { $0.id == current }) ?? integratedOrganization.folders.first(where: { $0.id == current })) {
+            if !LibraryShelf.isRoot(folder.id) { names.insert(folder.name, at: 0) }; next = folder.parentID
         }
         return names.joined(separator: " / ")
     }

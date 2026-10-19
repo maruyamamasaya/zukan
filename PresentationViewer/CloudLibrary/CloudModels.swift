@@ -31,7 +31,7 @@ enum CloudFormat: String, Codable, CaseIterable, Sendable {
 
 enum CloudLibraryKind: String, CaseIterable {
     case presentations, illustrations
-    var title: String { self == .presentations ? "プレゼン資料" : "図解ライブラリ" }
+    var title: String { self == .presentations ? "プレゼン" : "図解" }
     func contains(_ diagram: CloudDiagram) -> Bool {
         // Untyped historic entries remain in presentations; legacy single diagrams stay illustrations.
         let single = ["illustration", "roadmap", "architecture", "flowchart", "comparison"].contains(diagram.type)

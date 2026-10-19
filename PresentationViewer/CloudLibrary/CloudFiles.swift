@@ -146,22 +146,39 @@ actor CloudFileStore {
     private func writeOrganization(_ value: OrganizationState<CloudDiagram>) throws {
         try JSONEncoder().encode(value).write(to: saved.appendingPathComponent("organization.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
-    func createFolder(name: String, parentID: UUID? = nil) throws -> OrganizationState<CloudDiagram> {
+    func folderOrganization() throws -> OrganizationState<CloudDiagram> {
+        var state = try testLibrarySyncSource()
+        let documents = try cachedCatalog() + records().map(\.diagram) + state.collections.flatMap(\.members)
+        let kinds = Dictionary(documents.map { ($0.id.lowercased(), CloudLibraryKind.illustrations.contains($0)) }, uniquingKeysWith: { a, _ in a })
+        state.scopeLegacyFolders { kinds[$0.lowercased()] == true ? .illustration : .presentation }
+        return state
+    }
+    func createFolder(name: String, parentID: UUID? = nil, shelf: LibraryShelf? = nil) throws -> OrganizationState<CloudDiagram> {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        var value = try organization()
+        var value = try (shelf == nil ? testLibrarySyncSource() : folderOrganization())
         guard !name.isEmpty, name.count <= 120, parentID == nil || value.folders.contains(where: { $0.id == parentID }) else { throw CloudError.invalidResponse }
-        value.folders.append(OrganizationFolder(name: name, parentID: parentID))
-        try writeOrganization(value); return value
+        if let shelf { value.createFolder(name: name, shelf: shelf, parentID: parentID) }
+        else { value.folders.append(OrganizationFolder(name: name, parentID: parentID)) }
+        if shelf != nil { try applyTestLibrarySync(value) } else { try writeOrganization(value) }; return value
     }
-    func moveDocuments(_ ids: Set<String>, to folderID: UUID?) throws -> OrganizationState<CloudDiagram> {
-        var value = try organization()
+    func renameOrganizationFolder(_ id: UUID, name: String) throws -> OrganizationState<CloudDiagram> {
+        var value = try folderOrganization(); value.integrateFolders()
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 120, !LibraryShelf.isRoot(id), let index = value.folders.firstIndex(where: { $0.id == id }) else { throw CloudError.invalidResponse }
+        value.folders[index].name = name
+        try applyTestLibrarySync(value); return value
+    }
+    func moveDocuments(_ ids: Set<String>, to folderID: UUID?, scoped: Bool = false) throws -> OrganizationState<CloudDiagram> {
+        var value = try (scoped ? folderOrganization() : testLibrarySyncSource())
         guard folderID == nil || value.folders.contains(where: { $0.id == folderID }), ids.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw CloudError.invalidResponse }
-        value.moveBooks(Set(ids.map { $0.lowercased() }), to: folderID)
-        try writeOrganization(value); return value
+        if scoped { value.moveDocuments(Set(ids.map { $0.lowercased() }), to: folderID, memberID: { $0.id }) }
+        else { value.moveBooks(Set(ids.map { $0.lowercased() }), to: folderID) }
+        if scoped { try applyTestLibrarySync(value) } else { try writeOrganization(value) }; return value
     }
-    func removeOrganizationFolder(_ id: UUID) throws -> OrganizationState<CloudDiagram> {
-        var value = try organization(); value.removeFolder(id)
-        try writeOrganization(value); return value
+    func removeOrganizationFolder(_ id: UUID, scoped: Bool = false) throws -> OrganizationState<CloudDiagram> {
+        var value = try (scoped ? folderOrganization() : testLibrarySyncSource())
+        if scoped { value.removeIntegratedFolder(id) } else { value.removeFolder(id) }
+        if scoped { try applyTestLibrarySync(value) } else { try writeOrganization(value) }; return value
     }
     func costHistory() throws -> [StorageCostSnapshot] {
         let url = saved.appendingPathComponent("s3-storage-cost-history.json")

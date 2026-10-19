@@ -5,6 +5,30 @@ import LibraryOrganization
 @testable import PresentationViewer
 
 final class CloudLibraryTests: XCTestCase {
+    @MainActor func testUnifiedFoldersPreserveLegacyMembershipAndSeparateKinds() async throws {
+        let (files, root) = try temporaryStore(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = CloudLibraryStore(api: MockCloudAPI(), files: files)
+        await store.refresh()
+        let diagram = try XCTUnwrap(store.items.first { CloudLibraryKind.illustrations.contains($0) && $0.formats.contains(.pdf) })
+        let legacy = CloudCollection(id: UUID(), title: "旧まとめ", members: [diagram])
+        _ = try await files.saveCollection(legacy); await store.reloadSaved()
+        XCTAssertTrue(store.integratedOrganization.folders(in: .illustration).contains { $0.id == legacy.id })
+        XCTAssertTrue(store.integratedOrganization.containsDocument(diagram.id.lowercased(), in: legacy.id, memberID: { $0.id }))
+        let created = await store.createFolder("同名", shelf: .illustration); XCTAssertTrue(created)
+        let target = try XCTUnwrap(store.integratedOrganization.folders(in: .illustration).first { $0.name == "同名" })
+        let deckCreated = await store.createFolder("同名", shelf: .presentation); XCTAssertTrue(deckCreated)
+        XCTAssertFalse(store.integratedOrganization.folders(in: .presentation).contains { $0.id == target.id })
+        let renamed = await store.renameFolder(legacy.id, name: "移行フォルダ"); XCTAssertTrue(renamed)
+        let moved = await store.moveDocuments([diagram.id.lowercased()], to: target.id, scoped: true); XCTAssertTrue(moved)
+        XCTAssertTrue(store.collections.isEmpty)
+        XCTAssertEqual(store.organization.assignments[diagram.id.lowercased()], target.id)
+        XCTAssertTrue(store.organization.folders.contains { $0.id == legacy.id && $0.name == "移行フォルダ" })
+        let restarted = CloudLibraryStore(api: OfflineAPI(), files: files); await restarted.reloadSaved()
+        XCTAssertEqual(restarted.organization.assignments[diagram.id.lowercased()], target.id)
+        let removed = await restarted.removeFolder(legacy.id, scoped: true); XCTAssertTrue(removed)
+        XCTAssertEqual(restarted.organization.assignments[diagram.id.lowercased()], target.id)
+    }
+
     @MainActor
     func testCachedCoverDoesNotHidePDFOrRemainingPNGPages() async throws {
         let (files, root) = try temporaryStore(); defer { try? FileManager.default.removeItem(at: root) }

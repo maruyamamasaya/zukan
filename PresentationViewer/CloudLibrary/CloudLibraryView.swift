@@ -26,6 +26,7 @@ struct CloudLibraryView: View {
     @State private var selectedDocuments = Set<String>()
     @State private var folderName = ""
     @State private var showFolderDialog = false
+    @State private var renamingFolder: UUID?
     @State private var moving = false
     @State private var syncLab: SyncLabSession?
     @State private var syncSetup = false
@@ -38,8 +39,6 @@ struct CloudLibraryView: View {
     @State private var showSearch = false
     @FocusState private var searchFocused: Bool
     @State private var reading: CloudReading?
-    @State private var collectionDraft: CloudCollection?
-    @State private var collectionReading: CloudCollectionReading?
     @State private var opening = false
     @State private var showCapacity = false
     @State private var showClearDocuments = false
@@ -78,25 +77,21 @@ struct CloudLibraryView: View {
         let candidates = showTrash ? store.trashedDiagrams :
             store.items.map { store.preferredLocalVersion($0) } + (store.localDiagrams + savedDiagrams).sorted { $0.version > $1.version } + store.collections.flatMap(\.members) + store.hiddenDiagrams
         return candidates.filter {
-            (showTrash || store.lifecycle.status($0.id) == .active) && (showTrash || kind.contains($0)) && !$0.formats.allSatisfy { $0 == .svg } && matchesSearch($0) && (showTrash || matchesClassification($0) && matchesFolder($0))
+            (showTrash || store.lifecycle.status($0.id) == .active) && (showTrash || !phoneUI || kind.contains($0)) && !$0.formats.allSatisfy { $0 == .svg } && matchesSearch($0) && (showTrash || matchesClassification($0) && matchesFolder($0))
         }.filter { seen.insert($0.id.lowercased()).inserted }
     }
-    private var visibleCollections: [CloudCollection] {
-        guard !showTrash, !selecting, selectedShelf == "all", kind == .illustrations, selectedGroup == "すべて", selectedTag.isEmpty else { return [] }
-        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        return store.collections.filter { collection in
-            !store.members(of: collection).isEmpty && (term.isEmpty || collection.title.localizedCaseInsensitiveContains(term) || store.members(of: collection).contains(where: matchesSearch))
-        }
+    private var libraryShelf: LibraryShelf {
+        if !phoneUI, let id = UUID(uuidString: selectedShelf),
+           store.integratedOrganization.descendants(of: LibraryShelf.illustration.rootID).contains(id) { return .illustration }
+        return phoneUI && kind == .illustrations ? .illustration : .presentation
+    }
+    private var folders: [OrganizationFolder] {
+        phoneUI ? store.integratedOrganization.folders(in: libraryShelf) : store.integratedOrganization.orderedFolders
     }
     private var looseDiagrams: [CloudDiagram] {
-        guard kind == .illustrations else { return diagrams }
-        let grouped = Set(visibleCollections.flatMap { store.members(of: $0).map { $0.id.lowercased() } })
-        return diagrams.filter { !grouped.contains($0.id.lowercased()) }
-    }
-    private var collectionChoices: [CloudDiagram] {
-        var seen = Set<String>()
-        return (store.items + savedDiagrams).filter { kind.contains($0) && store.lifecycle.status($0.id) == .active && ($0.formats.contains(.png) || $0.formats.contains(.pdf)) }
-            .sorted { $0.version > $1.version }.filter { seen.insert($0.id.lowercased()).inserted }
+        guard let id = UUID(uuidString: selectedShelf), let collection = store.collections.first(where: { $0.id == id }) else { return diagrams }
+        let ranks = Dictionary(collection.members.enumerated().map { ($0.element.id.lowercased(), $0.offset) }, uniquingKeysWith: min)
+        return diagrams.sorted { (ranks[$0.id.lowercased()] ?? Int.max) < (ranks[$1.id.lowercased()] ?? Int.max) }
     }
     private var apiScope: String { searchScope == "タイトル" ? "title" : searchScope == "タグ" ? "tags" : "all" }
     private var searchRequest: String { "\(showTrash)" }
@@ -111,7 +106,7 @@ struct CloudLibraryView: View {
         let landscapeColumns = dynamicTypeSize.isAccessibilitySize || geometry.size.width - (phoneUI ? 160 : 0) < 540 ? 2 : 3
         NavigationStack {
             libraryContent(landscapePhone: landscapePhone, columns: landscapeColumns)
-            .navigationTitle(kind.title)
+            .navigationTitle(phoneUI ? kind.title : "本棚")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -156,15 +151,19 @@ struct CloudLibraryView: View {
         } message: {
             Text("S3の全版・成果物容量\(ByteCountFormatter.string(fromByteCount: deletionPlans.reduce(Int64(0)) { $0 + $1.sizeBytes }, countStyle: .file))（関連ファイルを含む計\(deletionPlans.reduce(0) { $0 + $1.objectCount })ファイル）と、スマホ・Macのアプリ内コピーを削除します。復元できません。オフライン端末のコピーは次の接続時に削除されます。登録フォルダの制作原本は残ります。")
         }
-        .alert("フォルダを作成", isPresented: $showFolderDialog) {
+        .alert(renamingFolder == nil ? "フォルダを作成" : "名前を変更", isPresented: $showFolderDialog) {
             TextField("フォルダ名", text: $folderName)
-            Button("作成") { Task { if await store.createFolder(folderName, parentID: UUID(uuidString: selectedShelf)) { folderName = "" } } }
+            Button("保存") { Task {
+                if let id = renamingFolder { _ = await store.renameFolder(id, name: folderName) }
+                else { _ = await store.createFolder(folderName, parentID: UUID(uuidString: selectedShelf), shelf: libraryShelf) }
+                folderName = ""
+            } }
             Button("キャンセル", role: .cancel) {}
         } message: { Text("フォルダ選択中なら、その中に作成します。") }
         .confirmationDialog("端末の資料をすべて削除しますか？", isPresented: $showClearDocuments, titleVisibility: .visible) {
             Button("端末の資料を削除", role: .destructive) { Task { await store.clearLocalDocuments() } }
         } message: {
-            Text("保存済み資料と一時キャッシュを両ライブラリから削除します。S3の正本、ローカル資料タブのファイル、フォルダ・まとめ・グループ・タグの設定は残ります。再取得には通信が必要です。")
+            Text("保存済み資料と一時キャッシュを両ライブラリから削除します。S3の正本、ローカル資料タブのファイル、フォルダ・グループ・タグの設定は残ります。再取得には通信が必要です。")
         }
         .sheet(item: $syncLab) { SyncLabView(session: $0) }
         .sheet(isPresented: $syncSetup) { SyncSetupView(available: production && onSyncLogin != nil && Bundle.main.object(forInfoDictionaryKey: "OrganizationSyncEnabled") as? Bool == true) {
@@ -175,10 +174,7 @@ struct CloudLibraryView: View {
             LibraryClassificationEditor(diagram: diagram, store: store)
         }
         .sheet(isPresented: $showCapacity) { CloudCapacityView(api: api, production: production, files: costFiles) }
-        .sheet(item: $collectionDraft) { draft in
-            CloudCollectionEditor(collection: draft, choices: collectionChoices, store: store)
-        }
-        .fullScreenCover(item: $collectionReading) { CloudCollectionReader(reading: $0, store: store) }
+
         .fullScreenCover(item: $reading) { CloudReader(reading: $0, store: store, onReauthenticate: onReauthenticate) }
         .alert("操作を完了できません", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
             if store.errorMessage == CloudError.authentication.errorDescription, let onReauthenticate {
@@ -228,42 +224,11 @@ struct CloudLibraryView: View {
                     LazyVGrid(columns: landscapePhone
                               ? Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: columns)
                               : [GridItem(.adaptive(minimum: 260), spacing: 20)], spacing: landscapePhone ? 12 : 20) {
-                        ForEach(visibleCollections) { collection in
-                            Button { openCollection(collection) } label: {
-                                if let first = store.members(of: collection).first {
-                                    CloudCover(diagram: first, store: store, offline: isSavedOnly(first), coverFocused: landscapePhone,
-                                               titleOverride: collection.title,
-                                               captionOverride: "\(store.members(of: collection).count)件のまとめ",
-                                               savedOverride: store.members(of: collection).allSatisfy { member in store.saved.contains { $0.diagram.id == member.id && $0.diagram.version == member.version } })
-                                }
-                            }.buttonStyle(.plain).disabled(opening || store.busy)
-                            .accessibilityLabel("\(collection.title)のまとめを読む")
-                            .contextMenu {
-                                Menu("資料のグループ・タグ", systemImage: "tag") {
-                                    ForEach(store.members(of: collection)) { member in
-                                        Button(member.title) { classificationDraft = member }
-                                    }
-                                }
-                                Button("まとめを編集", systemImage: "pencil") { collectionDraft = collection }
-                                Button("まとめを解除", systemImage: "rectangle.stack.badge.minus", role: .destructive) { Task { _ = await store.removeCollection(collection.id) } }
-                            }
-                            .overlay(alignment: .topTrailing) {
-                                Menu {
-                                    Menu("資料のグループ・タグ", systemImage: "tag") {
-                                        ForEach(store.members(of: collection)) { member in
-                                            Button(member.title) { classificationDraft = member }
-                                        }
-                                    }
-                                    Button("まとめを編集", systemImage: "pencil") { collectionDraft = collection }
-                                    Button("まとめを解除", systemImage: "rectangle.stack.badge.minus", role: .destructive) { Task { _ = await store.removeCollection(collection.id) } }
-                                } label: { Image(systemName: "ellipsis.circle.fill").font(.title2).padding(8).background(.regularMaterial, in: Circle()) }.padding(8)
-                            }
-                        }
                         ForEach(looseDiagrams, id: \.selfKey) { diagram in
                             diagramCard(diagram, landscapePhone: landscapePhone)
                         }
                     }
-                    if looseDiagrams.isEmpty && visibleCollections.isEmpty && !store.busy {
+                    if looseDiagrams.isEmpty && !store.busy {
                         ContentUnavailableView(showTrash ? "ゴミ箱は空です" : "資料が見つかりません",
                                                systemImage: showTrash ? "trash" : "magnifyingglass",
                                                description: Text(query.isEmpty ? "下に引いて一覧を更新してください。保存した資料は通信なしでも表示されます。" : "グループ・タグや検索条件を変えてみてください。"))
@@ -294,7 +259,7 @@ struct CloudLibraryView: View {
                             } else {
                                 Menu("フォルダへ移動") {
                                     Button("未整理") { moveSelection(to: nil) }
-                                    ForEach(store.organization.orderedFolders) { folder in Button(store.folderPath(folder.id)) { moveSelection(to: folder.id) } }
+                                    ForEach(folders) { folder in Button(store.folderPath(folder.id)) { moveSelection(to: folder.id) } }
                                 }.disabled(selectedDocuments.isEmpty || moving)
                                 Button("ゴミ箱へ移動", role: .destructive) {
                                     trashCandidates = diagrams.filter { selectedDocuments.contains($0.id.lowercased()) }; confirmTrash = true
@@ -392,17 +357,13 @@ struct CloudLibraryView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 2) {
                 if !phoneUI {
-                    Menu {
-                        ForEach(CloudLibraryKind.allCases, id: \.rawValue) { value in
-                            Button(value.title) { libraryDestination.wrappedValue = value.rawValue }
-                        }
-                            } label: { Label("本棚", systemImage: "books.vertical").font(.headline).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading) }
-                    Text(kind.title).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 8)
+                    Label("本棚", systemImage: "books.vertical").font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                 }
                 shelfRow("すべて", symbol: "books.vertical", value: "all")
                 shelfRow("未整理", symbol: "tray", value: "unfiled")
                 Text("フォルダ").font(.caption).foregroundStyle(.secondary).padding(.top, 14).padding(.horizontal, 8)
-                ForEach(store.organization.orderedFolders) { folder in
+                ForEach(folders) { folder in
                     shelfRow(folder.name, symbol: "folder", value: folder.id.uuidString)
                         .padding(.leading, CGFloat(max(0, store.folderPath(folder.id).components(separatedBy: " / ").count - 1)) * 12)
                         .accessibilityLabel(store.folderPath(folder.id))
@@ -410,10 +371,11 @@ struct CloudLibraryView: View {
                 Divider().padding(.vertical, 8)
                 shelfRow("ゴミ箱", symbol: "trash", value: "trash")
                 Menu {
-                    Button("フォルダを作成", systemImage: "folder.badge.plus") { folderName = ""; showFolderDialog = true }
-                    if let id = UUID(uuidString: selectedShelf) {
+                    Button("フォルダを作成", systemImage: "folder.badge.plus") { renamingFolder = nil; folderName = ""; showFolderDialog = true }
+                    if let id = UUID(uuidString: selectedShelf), !LibraryShelf.isRoot(id) {
+                        Button("名前を変更", systemImage: "pencil") { renamingFolder = id; folderName = folders.first(where: { $0.id == id })?.name ?? ""; showFolderDialog = true }
                         Button("フォルダを解除", systemImage: "folder.badge.minus") {
-                            Task { if await store.removeFolder(id) { selectedShelf = "all" } }
+                            Task { if await store.removeFolder(id, scoped: true) { selectedShelf = "all" } }
                         }
                     }
                     Divider()
@@ -474,22 +436,22 @@ struct CloudLibraryView: View {
         Task { let done = await store.setTrashed(targets, trashed: trashed); selectedDocuments.subtract(done) }
     }
     private func matchesFolder(_ diagram: CloudDiagram) -> Bool {
-        let assignment = store.organization.assignments[diagram.id.lowercased()]
-        if selectedShelf == "unfiled" { return assignment == nil }
-        if let id = UUID(uuidString: selectedShelf) { return assignment.map { store.organization.descendants(of: id).contains($0) } ?? false }
+        let organization = store.integratedOrganization
+        if selectedShelf == "unfiled" { return !organization.isFiled(diagram.id.lowercased(), memberID: { $0.id }) }
+        if let id = UUID(uuidString: selectedShelf) { return organization.containsDocument(diagram.id.lowercased(), in: id, memberID: { $0.id }) }
         return true
     }
     private func moveSelection(to folderID: UUID?) {
         let ids = selectedDocuments; moving = true
         Task {
-            if await store.moveDocuments(ids, to: folderID) { selectedDocuments.removeAll(); selecting = false }
+            if await store.moveDocuments(ids, to: folderID, scoped: true) { selectedDocuments.removeAll(); selecting = false }
             moving = false
         }
     }
     private var availableTags: [String] {
         let candidates = store.items + store.localDiagrams + savedDiagrams + store.hiddenDiagrams
         return LibraryClassification.normalizedTags(candidates.filter {
-            kind.contains($0)
+            !phoneUI || kind.contains($0)
         }.flatMap { store.classification($0).tags }).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
     private func matchesClassification(_ diagram: CloudDiagram) -> Bool {
@@ -500,9 +462,6 @@ struct CloudLibraryView: View {
     @ViewBuilder private var libraryActions: some View {
                     Button("整理情報の同期", systemImage: "icloud") { syncSetup = true }
                     Menu("詳細") { Button("同期の検証", systemImage: "arrow.triangle.2.circlepath") { Task { syncLab = await store.makeSyncLab() } } }
-                    if kind == .illustrations {
-                        Button("図解をまとめる", systemImage: "rectangle.stack.badge.plus") { collectionDraft = CloudCollection(id: UUID(), title: "", members: []) }
-                    }
                     Button("S3保存容量と月額費用", systemImage: "externaldrive") { showCapacity = true }
                     if let onSettings { Button("接続設定", systemImage: "gear") { onSettings() } }
                     if let onReauthenticate { Button("ログインし直す", systemImage: "person.crop.circle.badge.checkmark", action: onReauthenticate) }
@@ -541,7 +500,7 @@ struct CloudLibraryView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .submitLabel(.search)
-                    .accessibilityLabel("\(kind.title)を検索")
+                    .accessibilityLabel(phoneUI ? "\(kind.title)を検索" : "資料を検索")
                 if !query.isEmpty {
                     Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
                         .accessibilityLabel("検索をクリア")
@@ -569,20 +528,6 @@ struct CloudLibraryView: View {
     }
     private func isSavedOnly(_ diagram: CloudDiagram) -> Bool {
         !store.items.contains { $0.id == diagram.id && $0.version == diagram.version }
-    }
-    private func openCollection(_ collection: CloudCollection) {
-        guard !opening else { return }
-        opening = true
-        Task {
-            defer { opening = false }
-            do {
-                let pages = try await store.collectionPages(collection)
-                let first = pages[0]
-                if let document = await store.open(first.diagram, file: first.file, persist: false) {
-                    collectionReading = CloudCollectionReading(collection: collection, pages: pages, document: document)
-                }
-            } catch { store.errorMessage = "まとめを開けませんでした。ゴミ箱や接続状態を確認してください。" }
-        }
     }
     private func open(_ diagram: CloudDiagram, updating: Bool = false) {
         guard !opening else { return }
@@ -881,139 +826,6 @@ private struct CloudCapacityView: View {
             } catch { historyError = "容量は取得しましたが履歴を保存できませんでした。" }
         } catch {
             if !Task.isCancelled { errorMessage = capacity == nil ? "S3保存容量を取得できませんでした。接続状態とサーバーの対応状況を確認してください。" : "更新できませんでした。表示中の容量は前回の取得値です。" }
-        }
-    }
-}
-
-@MainActor
-private struct CloudCollectionEditor: View {
-    let collection: CloudCollection
-    let choices: [CloudDiagram]
-    @ObservedObject var store: CloudLibraryStore
-    @Environment(\.dismiss) private var dismiss
-    @State private var title: String
-    @State private var members: [CloudDiagram]
-    @State private var saving = false
-    init(collection: CloudCollection, choices: [CloudDiagram], store: CloudLibraryStore) {
-        self.collection = collection; self.choices = choices; self.store = store
-        _title = State(initialValue: collection.title); _members = State(initialValue: collection.members)
-    }
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("まとめの名前") { TextField("例：色即是空の図鑑", text: $title) }
-                Section {
-                    ForEach(members, id: \.id) { member in
-                        HStack {
-                            Text(member.title)
-                            Spacer()
-                            if let index = members.firstIndex(where: { $0.id == member.id }) {
-                                Button { members.swapAt(index, index - 1) } label: { Image(systemName: "arrow.up") }
-                                    .buttonStyle(.borderless).disabled(index == 0)
-                                    .accessibilityLabel("\(member.title)を前へ移動")
-                                Button { members.swapAt(index, index + 1) } label: { Image(systemName: "arrow.down") }
-                                    .buttonStyle(.borderless).disabled(index + 1 >= members.count)
-                                    .accessibilityLabel("\(member.title)を後へ移動")
-                            }
-                            Button { members.removeAll { $0.id == member.id } } label: { Image(systemName: "minus.circle.fill").foregroundStyle(.red) }
-                                .buttonStyle(.borderless).accessibilityLabel("\(member.title)をまとめから外す")
-                        }
-                    }.onMove { members.move(fromOffsets: $0, toOffset: $1) }
-                } header: { Text("読む順番 · \(members.count)件") } footer: { Text("上下のボタンで読む順番を変えられます。まとめはこのiPhoneに保存されます。") }
-                Section("追加する図解") {
-                    ForEach(choices.filter { candidate in !members.contains { $0.id.lowercased() == candidate.id.lowercased() } }, id: \.id) { member in
-                        Button { members.append(member) } label: { Label(member.title, systemImage: "plus.circle") }
-                            .disabled(members.count >= 100)
-                    }
-                }
-            }
-            .environment(\.editMode, .constant(.active))
-            .navigationTitle(collection.title.isEmpty ? "図解をまとめる" : "まとめを編集")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("キャンセル") { dismiss() }.disabled(saving) }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") {
-                        saving = true
-                        Task {
-                            let result = await store.saveCollection(CloudCollection(id: collection.id, title: title.trimmingCharacters(in: .whitespacesAndNewlines), members: members))
-                            saving = false
-                            if result { dismiss() }
-                        }
-                    }.disabled(saving || members.isEmpty || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || title.count > 120)
-                }
-            }
-            .alert("まとめを保存できません", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
-                Button("OK") { store.errorMessage = nil }
-            } message: { Text(store.errorMessage ?? "") }
-        }.interactiveDismissDisabled(saving)
-    }
-}
-private struct CloudCollectionReading: Identifiable {
-    let id = UUID()
-    let collection: CloudCollection
-    let pages: [CloudCollectionPage]
-    let document: OpenedDocument
-}
-@MainActor
-private struct CloudCollectionReader: View {
-    let reading: CloudCollectionReading
-    @ObservedObject var store: CloudLibraryStore
-    @State private var document: OpenedDocument
-    @State private var index = 0
-    @State private var loading = false
-    @State private var saving = false
-    init(reading: CloudCollectionReading, store: CloudLibraryStore) {
-        self.reading = reading; self.store = store; _document = State(initialValue: reading.document)
-    }
-    private var controls: ImagePageControls {
-        ImagePageControls(canPrevious: !loading && !saving && index > 0, canNext: !loading && !saving && index + 1 < reading.pages.count,
-                          previous: { move(to: index - 1) }, next: { move(to: index + 1) })
-    }
-    var body: some View {
-        DocumentViewer(document: document, libraryActions: AnyView(actions), imagePages: controls,
-                       displayIntent: .illustration, externalPageNavigation: true)
-            // Image navigation preserves full-screen state; PDF fallback needs a new PDF session.
-            .id(document.format == .png ? "collection-images" : document.id.uuidString)
-            .overlay(alignment: .bottom) {
-                VStack(spacing: 6) {
-                    if loading || saving { ProgressView(saving ? "まとめを保存中…" : "読み込み中…") }
-                    Text("\(index + 1) / \(reading.pages.count)").font(.caption.monospacedDigit())
-                }.padding(8).background(.regularMaterial, in: Capsule()).padding(.bottom, 12)
-            }
-            .alert("操作を完了できません", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
-                Button("OK") { store.errorMessage = nil }
-            } message: { Text(store.errorMessage ?? "") }
-    }
-    private var actions: some View {
-        let layout = UIDevice.current.userInterfaceIdiom == .phone
-            ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout())
-        return layout {
-            Text("\(index + 1) / \(reading.pages.count)").font(.caption.monospacedDigit())
-                .accessibilityLabel("まとめの\(index + 1)番目、全\(reading.pages.count)件")
-            Button {
-                saving = true
-                Task {
-                    for page in reading.pages {
-                        if Task.isCancelled { break }
-                        guard await store.open(page.diagram, file: page.file, persist: true) != nil else { break }
-                    }
-                    saving = false
-                }
-            } label: { Image(systemName: allSaved ? "bookmark.fill" : "bookmark").frame(minWidth: 44, minHeight: 44) }
-                .accessibilityLabel(allSaved ? "まとめは保存済み" : "まとめをすべて保存")
-                .disabled(loading || saving || allSaved || store.busy)
-        }
-    }
-    private var allSaved: Bool {
-        reading.pages.allSatisfy { store.isSaved(SavedCloudFile(diagram: $0.diagram, file: $0.file)) }
-    }
-    private func move(to next: Int) {
-        guard !loading, !saving, reading.pages.indices.contains(next) else { return }
-        loading = true
-        Task {
-            let page = reading.pages[next]
-            if let opened = await store.open(page.diagram, file: page.file, persist: false) { document = opened; index = next }
-            loading = false
         }
     }
 }
