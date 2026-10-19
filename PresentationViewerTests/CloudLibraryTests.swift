@@ -996,3 +996,46 @@ extension CloudLibraryTests {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("saved/management-restore.json").path))
     }
 }
+
+// Shared trash must never turn cached metadata into a resurrected document.
+extension CloudLibraryTests {
+    func testSharedTrashRetainsRestorableCopyThenPermanentlyPurgesIt() async throws {
+        let (files, root) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let api = MockCloudAPI()
+        let listed = try await api.list(query: "", cursor: nil)
+        let diagram = try XCTUnwrap(listed.items.first)
+        let detail = try await api.detail(id: diagram.id, version: diagram.version)
+        let file = try XCTUnwrap(detail.files.first { $0.format != .svg })
+        let grant = try await api.access(diagram: diagram, file: file)
+        let data = try await api.download(grant)
+        let record = SavedCloudFile(diagram: diagram, file: file)
+        try await files.save(data, record: record)
+        _ = try await files.cacheData(data, record: record)
+        try await files.cacheDetail(detail)
+        try await files.cacheCatalog([diagram])
+        _ = try await files.createFolder(name: "保持するフォルダ")
+        let management = try await files.managementBackup()
+        let document = OrganizationDocument(id: diagram.id, title: diagram.title, type: diagram.type, version: diagram.version, formats: diagram.formats.map(\.rawValue), pageCount: diagram.pageCount, tags: diagram.tags)
+        func entry(_ revision: Int, _ status: LibraryDocumentStatus) -> LibraryLifecycleEntry {
+            LibraryLifecycleEntry(id: diagram.id.lowercased(), document: document, revision: revision, status: status, updatedAt: "2026-10-19T00:00:00.000Z")
+        }
+        _ = try await files.applyLifecycle(entry(1, .trashed))
+        let hiddenURL = try await files.localURL(record)
+        XCTAssertNil(hiddenURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("saved/" + record.relativeName).path))
+        _ = try await files.applyLifecycle(entry(2, .active))
+        let restoredURL = try await files.localURL(record)
+        XCTAssertNotNil(restoredURL)
+        _ = try await files.applyLifecycle(entry(3, .deleted))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("saved/" + record.relativeName).path))
+        let records = try await files.records(); XCTAssertTrue(records.isEmpty)
+        let cached = try await files.cachedDiagrams(); XCTAssertTrue(cached.isEmpty)
+        let after = try await files.managementBackup(); XCTAssertEqual(after, management)
+        try await files.clearCache()
+        let tombstones = try await files.lifecycleIndex(); XCTAssertEqual(tombstones.status(diagram.id), .deleted)
+        do { try await files.save(data, record: record); XCTFail("Deleted document was saved again") } catch {}
+        _ = try await files.applyLifecycle(entry(2, .active))
+        let stillDeleted = try await files.lifecycleIndex(); XCTAssertEqual(stillDeleted.status(diagram.id), .deleted)
+    }
+}

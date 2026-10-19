@@ -1,6 +1,11 @@
 import Foundation
+import LibraryOrganization
 
 protocol CloudLibraryAPI: Sendable {
+    func lifecycleSnapshot() async throws -> LibraryLifecycleSnapshot
+    func moveToTrash(_ diagram: CloudDiagram, revision: Int, trashed: Bool) async throws -> LibraryLifecycleEntry
+    func deletionPlan(id: String) async throws -> LibraryDeletionPlan
+    func permanentlyDelete(_ plan: LibraryDeletionPlan) async throws -> LibraryLifecycleEntry
     func list(query: String, cursor: String?) async throws -> CloudList
     func list(query: String, cursor: String?, scope: String) async throws -> CloudList
     func detail(id: String, version: Int) async throws -> CloudDetail
@@ -9,6 +14,10 @@ protocol CloudLibraryAPI: Sendable {
 }
 
 extension CloudLibraryAPI {
+    func lifecycleSnapshot() async throws -> LibraryLifecycleSnapshot { throw CloudError.unavailable }
+    func moveToTrash(_ diagram: CloudDiagram, revision: Int, trashed: Bool) async throws -> LibraryLifecycleEntry { throw CloudError.unavailable }
+    func deletionPlan(id: String) async throws -> LibraryDeletionPlan { throw CloudError.unavailable }
+    func permanentlyDelete(_ plan: LibraryDeletionPlan) async throws -> LibraryLifecycleEntry { throw CloudError.unavailable }
     func list(query: String, cursor: String?, scope: String) async throws -> CloudList {
         let result = try await list(query: query, cursor: cursor)
         let items = result.items.filter { item in
@@ -104,7 +113,20 @@ final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
 }
 
+private actor CloudRequestPacer {
+    private let clock = ContinuousClock()
+    private var next: ContinuousClock.Instant?
+    func wait() async throws {
+        let now = clock.now
+        let slot = next.map { max($0, now) } ?? now
+        next = slot.advanced(by: .milliseconds(1100))
+        try await clock.sleep(until: slot)
+        try Task.checkCancellation()
+    }
+}
+
 struct HTTPSCloudAPI: CloudLibraryAPI {
+    private static let requestPacer = CloudRequestPacer()
     let baseURL: URL
     let allowedArtifactHosts: Set<String>
     let tokens: any CloudAccessTokenProvider
@@ -118,6 +140,7 @@ struct HTTPSCloudAPI: CloudLibraryAPI {
         session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
     }
     private func request<T: Decodable>(_ path: String, query: [URLQueryItem] = [], body: Data? = nil) async throws -> T {
+        try await Self.requestPacer.wait()
         var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
         components.queryItems = query.isEmpty ? nil : query
         var request = URLRequest(url: components.url!); request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -140,6 +163,27 @@ struct HTTPSCloudAPI: CloudLibraryAPI {
         if let cursor { q.append(URLQueryItem(name: "cursor", value: cursor)) }
         let result: CloudList = try await request("v1/diagrams", query: q)
         for item in result.items { try item.validate() }; return result
+    }
+    func lifecycleSnapshot() async throws -> LibraryLifecycleSnapshot {
+        let value: LibraryLifecycleSnapshot = try await request("v1/library-lifecycle")
+        try value.validate(); return value
+    }
+    func moveToTrash(_ diagram: CloudDiagram, revision: Int, trashed: Bool) async throws -> LibraryLifecycleEntry {
+        try diagram.validate()
+        let result: LibraryLifecycleEntry = try await request("v1/library-lifecycle/\(diagram.id.lowercased())/\(trashed ? "trash" : "restore")", body: JSONEncoder().encode(["revision": revision]))
+        try result.validate()
+        guard result.id == diagram.id.lowercased(), result.status == (trashed ? .trashed : .active) else { throw CloudError.invalidResponse }
+        return result
+    }
+    func deletionPlan(id: String) async throws -> LibraryDeletionPlan {
+        guard UUID(uuidString: id) != nil else { throw CloudError.invalidResponse }
+        let value: LibraryDeletionPlan = try await request("v1/library-lifecycle/\(id.lowercased())/deletion-plan")
+        try value.validate(); guard value.id == id.lowercased() else { throw CloudError.invalidResponse }; return value
+    }
+    func permanentlyDelete(_ plan: LibraryDeletionPlan) async throws -> LibraryLifecycleEntry {
+        try plan.validate()
+        let value: LibraryLifecycleEntry = try await request("v1/library-lifecycle/\(plan.id)/delete", body: JSONEncoder().encode(["digest": plan.digest]))
+        try value.validate(); guard value.id == plan.id, value.status == .deleted else { throw CloudError.invalidResponse }; return value
     }
     func detail(id: String, version: Int) async throws -> CloudDetail {
         guard UUID(uuidString: id) != nil, version > 0 else { throw CloudError.invalidResponse }

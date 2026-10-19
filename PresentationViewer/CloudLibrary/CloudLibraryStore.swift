@@ -5,6 +5,8 @@ import PDFKit
 
 @MainActor
 final class CloudLibraryStore: ObservableObject {
+    @Published private(set) var lifecycle = LibraryLifecycleIndex()
+    var lifecycleEnabled: Bool { Bundle.main.object(forInfoDictionaryKey: "LibraryLifecycleEnabled") as? Bool == true }
     @Published private(set) var organization = OrganizationState<CloudDiagram>()
     @Published private(set) var classifications: [String: LibraryClassification] = [:]
     @Published private(set) var collections: [CloudCollection] = []
@@ -48,6 +50,7 @@ final class CloudLibraryStore: ObservableObject {
         paginationFailed = false
         refreshing = true; defer { refreshing = false }
         do {
+            if !more && lifecycleEnabled { try await refreshLifecycle() }
             let append = more && query == listedQuery && scope == listedScope
             organization = try await files.organization(); classifications = try await files.classifications(); collections = try await files.collections(); hiddenDiagrams = try await files.hiddenDiagrams()
             saved = try await files.records()
@@ -205,7 +208,7 @@ final class CloudLibraryStore: ObservableObject {
         catch { errorMessage = message(error); return false }
     }
     func members(of collection: CloudCollection) -> [CloudDiagram] {
-        collection.resolved(using: items + saved.map(\.diagram), hidden: hiddenDiagrams)
+        collection.resolved(using: items + saved.map(\.diagram), hidden: hiddenDiagrams).filter { lifecycle.status($0.id) == .active }
     }
     func collectionPages(_ collection: CloudCollection) async throws -> [CloudCollectionPage] {
         var pages: [CloudCollectionPage] = []
@@ -223,6 +226,68 @@ final class CloudLibraryStore: ObservableObject {
         }
         guard !pages.isEmpty else { throw CloudError.unavailable }
         return pages
+    }
+    var trashedDiagrams: [CloudDiagram] {
+        lifecycle.entries.values.filter { $0.status == .trashed || $0.status == .deleting }.compactMap {
+            try? JSONDecoder().decode(CloudDiagram.self, from: JSONEncoder().encode($0.document))
+        }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+    private func publishLifecycle() async throws {
+        let directory = await files.organizationSyncDirectory()
+        for reference in Self.liveStores {
+            guard let store = reference.value, await store.files.organizationSyncDirectory() == directory else { continue }
+            store.lifecycle = try await store.files.lifecycleIndex()
+        }
+    }
+    func refreshLifecycle() async throws {
+        guard lifecycleEnabled else { return }
+        let snapshot = try await api.lifecycleSnapshot()
+        lifecycle = try await files.applyLifecycle(snapshot)
+        try await publishLifecycle()
+    }
+    func setTrashed(_ diagrams: [CloudDiagram], trashed: Bool) async -> Set<String> {
+        guard lifecycleEnabled, !busy else { errorMessage = "共通ゴミ箱はサーバー反映の準備中です。"; return [] }
+        busy = true; defer { busy = false }
+        var completed = Set<String>()
+        for diagram in diagrams {
+            do {
+                let id = diagram.id.lowercased()
+                let entry = try await api.moveToTrash(diagram, revision: lifecycle.entries[id]?.revision ?? 0, trashed: trashed)
+                lifecycle = try await files.applyLifecycle(entry)
+                completed.insert(id)
+                try await publishLifecycle()
+            } catch { errorMessage = "完了した操作は保持しました。残りの資料は再読み込みしてから再試行してください。"; break }
+        }
+        await reloadSaved()
+        return completed
+    }
+    func prepareDeletion(_ ids: Set<String>) async -> [LibraryDeletionPlan]? {
+        guard lifecycleEnabled, !busy, !ids.isEmpty else { return nil }
+        busy = true; defer { busy = false }
+        do {
+            var plans: [LibraryDeletionPlan] = []
+            for id in ids.sorted() { plans.append(try await api.deletionPlan(id: id)) }
+            return plans
+        } catch { errorMessage = "削除対象を確認できませんでした。再読み込みしてから再試行してください。"; return nil }
+    }
+    func permanentlyDelete(_ plans: [LibraryDeletionPlan]) async -> Set<String> {
+        guard lifecycleEnabled, !busy else { return [] }
+        busy = true; defer { busy = false }
+        var completed = Set<String>()
+        for plan in plans {
+            do {
+                let entry = try await api.permanentlyDelete(plan)
+                lifecycle = try await files.applyLifecycle(entry)
+                completed.insert(plan.id)
+                try await publishLifecycle()
+            } catch {
+                try? await refreshLifecycle()
+                errorMessage = "削除を完了できない資料があります。削除中の資料は復元できません。同じ対象の削除を再試行できます。"
+                break
+            }
+        }
+        await reloadSaved()
+        return completed
     }
     func isHidden(_ diagram: CloudDiagram) -> Bool {
         hiddenDiagrams.contains { $0.id.lowercased() == diagram.id.lowercased() }
@@ -265,11 +330,14 @@ final class CloudLibraryStore: ObservableObject {
     }
     func reloadSaved() async {
         do {
+            lifecycle = try await files.lifecycleIndex()
+            try await files.purgeDeletedCopies(lifecycle)
             if items.isEmpty { items = (try? await files.cachedCatalog()) ?? [] }
             organization = try await files.organization(); classifications = try await files.classifications(); collections = try await files.collections(); hiddenDiagrams = try await files.hiddenDiagrams(); saved = try await files.records(); localDiagrams = try await files.cachedDiagrams(); if items.isEmpty { items = try await files.cachedDiagrams(); offline = true } } catch { errorMessage = message(error) }
     }
     func detail(_ diagram: CloudDiagram) async throws -> CloudDetail {
         try diagram.validate()
+        guard lifecycle.status(diagram.id) == .active else { throw CloudError.unavailable }
         if let detail = try await files.cachedDetail(diagram) {
             if offline {
                 let local = try await files.localFiles(detail)

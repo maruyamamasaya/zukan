@@ -35,6 +35,41 @@ actor CloudFileStore {
         }
         return try CloudFileStore(saved: saved, cache: cache)
     }
+    func lifecycleIndex() throws -> LibraryLifecycleIndex {
+        let url = saved.appendingPathComponent("lifecycle.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return LibraryLifecycleIndex() }
+        return try JSONDecoder().decode(LibraryLifecycleIndex.self, from: Data(contentsOf: url))
+    }
+    func applyLifecycle(_ snapshot: LibraryLifecycleSnapshot) throws -> LibraryLifecycleIndex {
+        var index = try lifecycleIndex(); try index.merge(snapshot)
+        try JSONEncoder().encode(index).write(to: saved.appendingPathComponent("lifecycle.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        try purgeDeletedCopies(index)
+        return index
+    }
+    func applyLifecycle(_ entry: LibraryLifecycleEntry) throws -> LibraryLifecycleIndex {
+        try applyLifecycle(LibraryLifecycleSnapshot(entries: [entry]))
+    }
+    func purgeDeletedCopies(_ index: LibraryLifecycleIndex) throws {
+        let ids = index.deletedIDs
+        guard !ids.isEmpty else { return }
+        // Only application-owned files in this account namespace are followed.
+        // A durable tombstone is already present if this cleanup is interrupted.
+        for directory in [saved, cache] {
+            for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+                let name = url.lastPathComponent.lowercased()
+                if ids.contains(where: { name.hasPrefix($0 + "-") || name.hasPrefix("detail-" + $0 + "-") }) {
+                    try FileManager.default.removeItem(at: url)
+                }
+            }
+        }
+        let remaining = try records().filter { !ids.contains($0.diagram.id.lowercased()) }
+        try JSONEncoder().encode(remaining).write(to: saved.appendingPathComponent("index.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        let catalog = try cachedCatalog().filter { !ids.contains($0.id.lowercased()) }
+        try cacheCatalog(catalog)
+    }
+    private func requireActiveCopy(_ id: String) throws {
+        guard try lifecycleIndex().status(id) == .active else { throw CloudError.unavailable }
+    }
     func syncLabDirectory() -> URL { saved.appendingPathComponent("sync-lab") }
     func organizationSyncDirectory() -> URL { saved.appendingPathComponent("organization-sync") }
     func testLibrarySyncDirectory() -> URL { saved.appendingPathComponent("test-library-sync") }
@@ -203,6 +238,7 @@ actor CloudFileStore {
         return records.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
     }
     private func verify(_ data: Data, record: SavedCloudFile) throws {
+        try requireActiveCopy(record.diagram.id)
         try record.validate()
         guard data.count == record.file.sizeBytes, cloudHash(data) == record.file.sha256 else { throw CloudError.integrity }
     }
@@ -215,6 +251,7 @@ actor CloudFileStore {
     }
     /// Only verified bytes for this exact immutable version may be reused.
     func localURL(_ record: SavedCloudFile) throws -> URL? {
+        guard try lifecycleIndex().status(record.diagram.id) == .active else { return nil }
         try record.validate()
         if let url = try? open(record) { return url }
         let url = cache.appendingPathComponent(record.id + "-" + record.file.sha256 + "." + record.file.format.rawValue)
@@ -233,6 +270,7 @@ actor CloudFileStore {
         return cache.appendingPathComponent("detail-\(diagram.id.lowercased())-\(diagram.version).json")
     }
     func cachedDetail(_ diagram: CloudDiagram) throws -> CloudDetail? {
+        guard try lifecycleIndex().status(diagram.id) == .active else { return nil }
         let url = try detailURL(diagram)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         do {
@@ -248,6 +286,7 @@ actor CloudFileStore {
         }
     }
     func cacheDetail(_ detail: CloudDetail) throws {
+        try requireActiveCopy(detail.id)
         try detail.validate()
         try writeCache(JSONEncoder().encode(detail), to: detailURL(detail.diagram))
     }
@@ -262,7 +301,8 @@ actor CloudFileStore {
     }
     func cacheCatalog(_ diagrams: [CloudDiagram]) throws {
         for diagram in diagrams { try diagram.validate() }
-        try writeCache(JSONEncoder().encode(diagrams), to: cache.appendingPathComponent("catalog.json"))
+        let allowed = try diagrams.filter { try lifecycleIndex().status($0.id) == .active }
+        try writeCache(JSONEncoder().encode(allowed), to: cache.appendingPathComponent("catalog.json"))
     }
     private func writeCache(_ data: Data, to url: URL) throws {
         try Self.cacheLock.withLock {
