@@ -1,7 +1,9 @@
 import SwiftUI
+import LibraryOrganizationUI
 
 @MainActor
 struct LibraryView: View {
+    @Environment(\.bookshelfTheme) private var theme
     @StateObject private var store = LibraryStore()
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -70,6 +72,7 @@ struct LibraryView: View {
                 }
             }
             .scrollPosition(id: $visibleItemID, anchor: .top)
+            .background(theme.canvas)
             .refreshable { await store.refresh() }
             .navigationTitle("ライブラリ")
             .toolbar {
@@ -79,6 +82,7 @@ struct LibraryView: View {
                     } label: { Label("フォルダ管理", systemImage: "folder.badge.gearshape") }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    BookshelfThemePicker()
                     Button { Task { await store.refresh() } } label: { Label("更新", systemImage: "arrow.clockwise") }
                         .keyboardShortcut("r", modifiers: .command)
                         .disabled(store.refreshing)

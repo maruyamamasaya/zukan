@@ -1,4 +1,5 @@
 import SwiftUI
+import LibraryOrganizationUI
 import QuickLookThumbnailing
 
 struct DocumentTile: View {
@@ -8,30 +9,46 @@ struct DocumentTile: View {
     @State private var thumbnail: UIImage?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8).fill(Color(uiColor: .secondarySystemBackground))
-                if let thumbnail {
-                    Image(uiImage: thumbnail).resizable().scaledToFit().padding(coverFocused ? 0 : 8)
-                } else {
-                    Image(systemName: item.format.symbol)
-                        .font(.largeTitle).foregroundStyle(.secondary)
-                }
-            }
-            .aspectRatio(coverFocused ? 16 / 9 : 4 / 3, contentMode: .fit)
-            .clipped()
-            .accessibilityHidden(true)
-            Text(item.name).font(.subheadline).lineLimit(2).truncationMode(.middle)
-                .foregroundStyle(.primary)
-            Text(item.format.rawValue.uppercased()).font(.caption).foregroundStyle(.secondary)
+        SquareLibraryCard(title: item.name) {
+            Color(uiColor: .secondarySystemBackground)
+                .overlay {
+                    if let thumbnail {
+                        Image(uiImage: thumbnail).resizable().scaledToFit().padding(8)
+                    } else {
+                        Image(systemName: item.format.symbol).font(.largeTitle).foregroundStyle(.secondary)
+                    }
+                }.clipShape(RoundedRectangle(cornerRadius: 8))
+                .accessibilityHidden(true)
+        } caption: {
+            Text(item.format.rawValue.uppercased()).foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel(item.name)
         .contentShape(Rectangle())
         .task(id: item.thumbnailKey + folder.bookmark.base64EncodedString()) {
             thumbnail = nil
             let image = await ThumbnailService.shared.image(for: item, folder: folder)
             if !Task.isCancelled { thumbnail = image }
         }
+    }
+}
+
+/// The whole card is square; the title always reserves the same two-line slot.
+struct SquareLibraryCard<Cover: View, Caption: View>: View {
+    let title: String
+    @ViewBuilder var cover: () -> Cover
+    @ViewBuilder var caption: () -> Caption
+    var body: some View {
+        Color.clear.aspectRatio(1, contentMode: .fit)
+            .overlay {
+                VStack(alignment: .leading, spacing: 8) {
+                    cover().frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
+                    Text(title).font(.headline).foregroundStyle(.primary)
+                        .lineLimit(2, reservesSpace: true).truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    caption().font(.caption).lineLimit(1)
+                }.padding(12)
+            }
+            .bookshelfCard()
     }
 }
 

@@ -5,16 +5,18 @@ struct ImageDocumentView: View {
     @State private var image: UIImage?
     let onTap: () -> Void
     let presenting: Bool
+    let onZoomChanged: (Bool) -> Void
 
-    init(url: URL, presenting: Bool = false, onTap: @escaping () -> Void = {}) {
+    init(url: URL, presenting: Bool = false, onTap: @escaping () -> Void = {}, onZoomChanged: @escaping (Bool) -> Void = { _ in }) {
         _image = State(initialValue: UIImage(contentsOfFile: url.path))
         self.onTap = onTap
+        self.onZoomChanged = onZoomChanged
         self.presenting = presenting
     }
 
     var body: some View {
         if let image {
-            ImageCanvas(image: image, presenting: presenting, onTap: onTap)
+            ImageCanvas(image: image, presenting: presenting, onTap: onTap, onZoomChanged: onZoomChanged)
         } else {
             ViewerErrorView(message: "画像を読み込めません。ファイルが破損している可能性があります。")
         }
@@ -26,12 +28,17 @@ private struct ImageCanvas: UIViewRepresentable {
     let presenting: Bool
     let onTap: () -> Void
 
+    let onZoomChanged: (Bool) -> Void
+
     func makeUIView(context: Context) -> ZoomingImageView {
-        ZoomingImageView(image: image, onTap: onTap)
+        let view = ZoomingImageView(image: image, onTap: onTap)
+        view.onZoomChanged = onZoomChanged
+        return view
     }
 
     func updateUIView(_ view: ZoomingImageView, context: Context) {
         view.onTap = onTap
+        view.onZoomChanged = onZoomChanged
         view.setPresentation(presenting)
     }
 }
@@ -44,6 +51,7 @@ final class ZoomingImageView: UIScrollView, UIScrollViewDelegate {
     private var resizing = false
     private var presenting = false
     private var readingZoom: CGFloat = 1
+    var onZoomChanged: (Bool) -> Void = { _ in }
     var onTap: () -> Void
 
     init(image: UIImage, onTap: @escaping () -> Void) {
@@ -117,7 +125,11 @@ final class ZoomingImageView: UIScrollView, UIScrollViewDelegate {
     }
 
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
-    func scrollViewDidZoom(_ scrollView: UIScrollView) { centerImage() }
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        centerImage()
+        let zoomed = zoomScale > minimumZoomScale * 1.01
+        DispatchQueue.main.async { [weak self] in self?.onZoomChanged(zoomed) }
+    }
 
     private func centerImage() {
         let horizontal = max(0, (bounds.width - imageView.frame.width) / 2)

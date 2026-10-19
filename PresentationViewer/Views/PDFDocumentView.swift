@@ -6,12 +6,13 @@ import Combine
 struct PDFDocumentView: View {
     @ObservedObject var session: PDFReadingSession
     let thumbnailsVisible: Bool
+    var onZoomChanged: (Bool) -> Void = { _ in }
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     var body: some View {
         if session.pageCount > 0 {
             PDFCanvas(session: session, thumbnailsVisible: thumbnailsVisible && !session.isPresenting,
-                      verticalThumbnails: horizontalSizeClass == .regular)
+                      verticalThumbnails: horizontalSizeClass == .regular, onZoomChanged: onZoomChanged)
         } else {
             ViewerErrorView(message: "PDFが破損しているか、パスワードで保護されています。")
         }
@@ -23,12 +24,14 @@ private struct PDFCanvas: UIViewControllerRepresentable {
     @ObservedObject var session: PDFReadingSession
     let thumbnailsVisible: Bool
     let verticalThumbnails: Bool
+    let onZoomChanged: (Bool) -> Void
 
     func makeUIViewController(context: Context) -> PDFCanvasController {
         PDFCanvasController(session: session)
     }
 
     func updateUIViewController(_ controller: PDFCanvasController, context: Context) {
+        controller.onZoomChanged = onZoomChanged
         controller.configure(thumbnailsVisible: thumbnailsVisible, verticalThumbnails: verticalThumbnails)
     }
 }
@@ -38,6 +41,8 @@ final class PDFCanvasController: UIViewController {
     let pdfView = ResizingPDFView()
     private let thumbnailView = PDFThumbnailView()
     private let session: PDFReadingSession
+    var onZoomChanged: (Bool) -> Void = { _ in }
+    private var scaleObserver: NSObjectProtocol?
     private var pageObserver: NSObjectProtocol?
     private var subscription: AnyCancellable?
     private var layoutConstraints: [NSLayoutConstraint] = []
@@ -74,6 +79,13 @@ final class PDFCanvasController: UIViewController {
                     self.session.selectPage(document.index(for: page))
                 }
             }
+        scaleObserver = NotificationCenter.default.addObserver(forName: .PDFViewScaleChanged, object: pdfView, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let zoomed = self.pdfView.scaleFactor > self.pdfView.minScaleFactor * 1.01
+                DispatchQueue.main.async { [weak self] in self?.onZoomChanged(zoomed) }
+            }
+        }
         subscription = session.$pageIndex.sink { [weak self] index in self?.showPage(index) }
     }
 
@@ -152,6 +164,7 @@ final class PDFCanvasController: UIViewController {
 
     deinit {
         if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
+        if let scaleObserver { NotificationCenter.default.removeObserver(scaleObserver) }
     }
 }
 

@@ -2,6 +2,7 @@ import Foundation
 import LibraryOrganization
 
 protocol CloudLibraryAPI: Sendable {
+    var supportsLifecycle: Bool { get }
     func lifecycleSnapshot() async throws -> LibraryLifecycleSnapshot
     func moveToTrash(_ diagram: CloudDiagram, revision: Int, trashed: Bool) async throws -> LibraryLifecycleEntry
     func deletionPlan(id: String) async throws -> LibraryDeletionPlan
@@ -14,6 +15,7 @@ protocol CloudLibraryAPI: Sendable {
 }
 
 extension CloudLibraryAPI {
+    var supportsLifecycle: Bool { false }
     func lifecycleSnapshot() async throws -> LibraryLifecycleSnapshot { throw CloudError.unavailable }
     func moveToTrash(_ diagram: CloudDiagram, revision: Int, trashed: Bool) async throws -> LibraryLifecycleEntry { throw CloudError.unavailable }
     func deletionPlan(id: String) async throws -> LibraryDeletionPlan { throw CloudError.unavailable }
@@ -126,6 +128,7 @@ private actor CloudRequestPacer {
 }
 
 struct HTTPSCloudAPI: CloudLibraryAPI {
+    var supportsLifecycle: Bool { true }
     private static let requestPacer = CloudRequestPacer()
     let baseURL: URL
     let allowedArtifactHosts: Set<String>

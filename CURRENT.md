@@ -1,3 +1,13 @@
+2026-10-19：ゴミ箱へ「ゴミ箱を空にする…」追加。S3全版容量と関連ファイル数の確認後に既存完全削除へ進む。52 XCTest合格、Vespera/Mira更新・起動成功。今回実資料削除なし。
+
+2026-10-19：端末内の「非表示」を画面から廃止し、共通ゴミ箱へ統一。旧非表示の資料は通常一覧へ戻し、自動削除/ゴミ箱移動なし。[仕様](docs/local-hidden-documents.md)。
+
+2026-10-19：屋久杉/黒漆の素材未描画をPNG直接復号で修正。共有の画素検査を追加、iPad/iPhone各72テスト成功・実素材目視、Mira/Vesperaへ11:07再更新/起動成功。初回は配色確認のみで素材の検証不足。[仕様と配備](docs/material-themes.md)。
+
+2026-10-19：iPhone右端操作列とiPad右下の大型ページボタンをSimulatorで確認し、Vespera/Miraへ更新・起動成功。[画面確認と証跡](docs/unified-reader.md#右端操作の画面確認更新2026-10-19)。
+
+2026-10-19：iPhoneのPDF/画像閲覧を右端の縦操作列へ変更し、上下の操作バー領域を資料表示へ戻した。実機未反映。仕様・検証は[統合ビューアー](docs/unified-reader.md)。
+
 # 現在地
 
 2026-10-10。既存ローカル資料とモック図解ライブラリを維持。Phase 11B-2のPKCE/Keychain・本番設定切替・利用者別保存・URL再取得をローカル実装。署名付きSimulator27テスト合格。接続iPhone更新成功、最終起動は端末Lockedで未確認。AWS公開APIは承認後にデプロイ済み。iOSに公開接続設定を反映、既定モックは維持。本人のメール／owner設定は回答待ち。[適用記録](docs/phase11b2-deployment.md)。実Cognito／実API／iOS実S3・実機操作は未検証。
@@ -113,3 +123,7 @@ Phase 11B-3：実Cognito設定・S3公開ブロックを読取確認。本人登
 2026-10-19：iPad Miraへ端末指定署名build・インストール・起動成功。本人が本棚／本番ログイン／実資料一覧を確認。閲覧・回転・オフライン確認は継続中。[検証](docs/ipad-layout.md#miraへの実機反映2026-10-19)。
 
 2026-10-19：表紙PNGだけを閲覧一覧と見なしてPDF/残りPNGを隠す不具合を修正。オンラインは全manifest、オフラインのみ取得済みに限定。69 XCTest合格、iPad SimulatorでPDF表示・形式切替・PNGスワイプ2枚目/次ボタン3枚目を確認。[原因・検証](docs/reader-cover-cache-fix.md)。
+
+2026-10-19：iPhone/iPadのPDF・PNG閲覧を統合。開くと単ページ、タップで操作切替、スワイプでページ送り、拡大中はパンを優先。両Simulatorで各71 XCTestと実操作確認後に実機反映。[操作・検証](docs/unified-reader.md)。
+
+統合ビューアーの実機反映：10:14 JST、Mira/Vesperaとも上書き更新・更新版起動成功。両Simulator確認後に反映し、認証/保存資料を保持。実機操作は本人確認待ち。[記録](docs/unified-reader.md#実機反映)。

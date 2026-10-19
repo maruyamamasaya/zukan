@@ -1,4 +1,5 @@
 import SwiftUI
+import LibraryOrganizationUI
 
 /// Keep iPhone landscape-only; let iPad retain its current orientation.
 private struct LibraryOrientationAnchor: UIViewControllerRepresentable {
@@ -52,6 +53,7 @@ struct PresentationViewerApp: App {
         WindowGroup {
             AppLibraryTabs()
                 .background(LibraryOrientationAnchor().frame(width: 0, height: 0))
+                .bookshelfAppearance()
         }
     }
 }
@@ -65,6 +67,7 @@ private struct AppLibraryTabs: View {
     @StateObject private var connection = CloudConnectionState()
     @Environment(\.scenePhase) private var scenePhase
     private let files = Result { try CloudFileStore.applicationStore() }
+    private var hideLibraryTabs: Bool { UIDevice.current.userInterfaceIdiom == .phone || selectedTab != "local" && (!production || connection.auth?.libraryNamespace != nil) }
     var body: some View {
         TabView(selection: $selectedTab) {
             ForEach(CloudLibraryKind.allCases, id: \.rawValue) { kind in
@@ -76,11 +79,11 @@ private struct AppLibraryTabs: View {
                     } else { CloudLibraryView(files: files, kind: kind, onSettings: { settings = true }) }
                 case .failure: ContentUnavailableView("保存領域を準備できません", systemImage: "externaldrive.badge.exclamationmark")
                 }
-            }.toolbar(UIDevice.current.userInterfaceIdiom == .phone ? .hidden : .visible, for: .tabBar).tag(kind.rawValue).tabItem { Label(kind.title, systemImage: kind == .presentations ? "square.stack" : "rectangle.on.rectangle") }
+            }.toolbar(hideLibraryTabs ? .hidden : .visible, for: .tabBar).tag(kind.rawValue).tabItem { Label(kind.title, systemImage: kind == .presentations ? "square.stack" : "rectangle.on.rectangle") }
             }
-            LibraryView().toolbar(UIDevice.current.userInterfaceIdiom == .phone ? .hidden : .visible, for: .tabBar).tag("local").tabItem { Label("ローカル資料", systemImage: "folder") }
+            LibraryView().toolbar(hideLibraryTabs ? .hidden : .visible, for: .tabBar).tag("local").tabItem { Label("ローカル資料", systemImage: "folder") }
         }
-        .toolbar(UIDevice.current.userInterfaceIdiom == .phone ? .hidden : .visible, for: .tabBar)
+        .toolbar(hideLibraryTabs ? .hidden : .visible, for: .tabBar)
         .environment(\.libraryDestination, $selectedTab)
         .overlay {
             if UIDevice.current.userInterfaceIdiom == .phone && selectedTab != "local" && (production && connection.auth?.libraryNamespace == nil || (try? files.get()) == nil) {
@@ -93,6 +96,7 @@ private struct AppLibraryTabs: View {
         .onChange(of: scenePhase) { _, phase in if phase == .active { connection.initialize(); connection.auth?.restoreSession() } }
         .sheet(isPresented: $settings) {
             NavigationStack { Form {
+                Section("外観") { BookshelfThemePicker() }
                 Toggle("本番APIを使用", isOn: $production)
                 Text("オフ：同梱サンプル。オン：設定済みHTTPS APIとCognito。資料と保存領域を分離します。ログアウト後は本番の保存資料を表示せず、同じ利用者で再ログインすると再利用できます。")
             }.navigationTitle("接続設定").toolbar { Button("閉じる") { settings = false } } }
@@ -229,12 +233,13 @@ struct LibraryDrawer<Content: View>: View {
                                 }
                                 destinationButton("ローカル資料", icon: "folder", value: "local")
                                 Divider()
+                                BookshelfThemePicker()
                                 content()
                             }.padding(16)
                         }
                     }
                     .frame(width: min(dynamicTypeSize.isAccessibilitySize ? 340 : 260, geometry.size.width * 0.80))
-                    .background(.regularMaterial)
+                    .background(BookshelfMaterial())
                     .transition(.move(edge: .trailing))
                     .simultaneousGesture(DragGesture().onEnded { if $0.translation.width > 60 && abs($0.translation.height) < 40 { close() } })
                 } else {

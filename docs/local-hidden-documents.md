@@ -1,4 +1,15 @@
-# iPhone内の資料非表示
+# 非表示から共通ゴミ箱への統一
+
+2026-10-19：本人の指定で「非表示にする」「非表示の資料」「表示に戻す」の画面操作を廃止。通常一覧・タグ・まとめの解決は旧非表示設定を除外条件に使わない。旧hidden-diagrams.jsonの資料情報も一覧候補に含め、旧設定だけが残る資料へ到達できるようにする。ゴミ箱/削除中の資料は共通lifecycleで引き続き除外する。
+
+以前隠した資料は通常一覧へ戻す。自動でゴミ箱へ移さず、クラウドや端末コピーを削除しない。旧JSONと低水準の読書き機能は互換性のため保持するが、アプリに新しい非表示操作はない。ゴミ箱への移動は資料カードのメニューまたは複数選択から行い、復元はゴミ箱から行う。AWS/API変更なし。
+
+検証：署名を有効にしたiPhone17e/iOS26.5 SimulatorのCloudLibraryTests 52件合格。新規回帰は旧非表示のまとめ復帰、active維持、旧JSON保持。初回署名なしはKeychain認証の2テストで3失敗、署名あり再実行で解消。git diff --check合格。Simulatorのカードメニューから非表示操作が消えたことを確認（モックは共通ゴミ箱無効のため移動操作は実行せず）。証跡：outputs/reader-controls/trash-only-menu.png。
+
+既存Team/Bundle IDによる署名build/codesign合格後、11:03 JSTにVesperaとMiraの両実機へ上書き更新・起動成功。アンインストール/既存保存データ削除なし。本人の実機操作は未確認。ログ：/tmp/zukan-trash-only-{signed-tests,device-build,phone-install,phone-launch,ipad-install,ipad-launch}.log。
+
+以下は導入当時の記録であり、現在の操作方法ではない。
+
 
 2026-10-10。クラウドのゴミ箱操作が実機で失敗したとの本人報告を受け、本人の希望で端末内の非表示へ切替。原因調査・クラウド修正は今回の対象外。
 
@@ -9,3 +20,5 @@ CloudFileStoreの利用者別Application Support保存領域にhidden-diagrams.j
 iOSのlistTrash/setTrashed呼出・クライアント実装を削除。既存本番APIとAWS設定は今回変更しない。先行ゴミ箱APIの実機失敗原因は未特定。クラウド側ですでに移動済みの資料を端末の非表示一覧へ移行・復元する機能は含まない。
 
 検証：CloudLibraryTestsでAPI通信を伴わない非表示/再表示、再生成したstoreでの永続化、キャッシュ削除後の維持、全版適用、保存コピー保持、namespace分離、保存失敗を確認。iPhone 15/iOS17.4 Simulatorで39 XCTest合格。既存Teamで署名build・codesign検証合格、Vesperaへ同Bundle IDで更新インストール・更新版起動成功。UI取得はタイムアウトし、新画面目視と本人実機操作は未確認。証跡はoutputs/local-hide。
+
+ゴミ箱内の「ゴミ箱を空にする…」から全件の完全削除計画へ進める。件数・全版容量・関連ファイル数を確認し、最後の明示確認でS3成果物とアプリ内コピーを削除する。削除済み通知は保持。AWS変更/今回の実資料削除なし。

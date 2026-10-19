@@ -6,7 +6,7 @@ import PDFKit
 @MainActor
 final class CloudLibraryStore: ObservableObject {
     @Published private(set) var lifecycle = LibraryLifecycleIndex()
-    var lifecycleEnabled: Bool { Bundle.main.object(forInfoDictionaryKey: "LibraryLifecycleEnabled") as? Bool == true }
+    var lifecycleEnabled: Bool { Bundle.main.object(forInfoDictionaryKey: "LibraryLifecycleEnabled") as? Bool == true && api.supportsLifecycle }
     @Published private(set) var organization = OrganizationState<CloudDiagram>()
     @Published private(set) var classifications: [String: LibraryClassification] = [:]
     @Published private(set) var collections: [CloudCollection] = []
@@ -208,7 +208,7 @@ final class CloudLibraryStore: ObservableObject {
         catch { errorMessage = message(error); return false }
     }
     func members(of collection: CloudCollection) -> [CloudDiagram] {
-        collection.resolved(using: items + saved.map(\.diagram), hidden: hiddenDiagrams).filter { lifecycle.status($0.id) == .active }
+        collection.resolved(using: items + saved.map(\.diagram) + hiddenDiagrams, hidden: []).filter { lifecycle.status($0.id) == .active }
     }
     func collectionPages(_ collection: CloudCollection) async throws -> [CloudCollectionPage] {
         var pages: [CloudCollectionPage] = []

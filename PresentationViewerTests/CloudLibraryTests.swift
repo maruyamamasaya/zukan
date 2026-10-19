@@ -339,6 +339,20 @@ final class CloudLibraryTests: XCTestCase {
         XCTAssertTrue(restarted.items.isEmpty)
     }
     @MainActor
+    func testLegacyHiddenCollectionMemberReturnsWithoutMovingToTrash() async throws {
+        let (files, root) = try temporaryStore(); defer { try? FileManager.default.removeItem(at: root) }
+        let api = MockCloudAPI()
+        let item = try await api.list(query: "RAG", cursor: nil).items[0]
+        _ = try await files.setHidden(item, hidden: true)
+        let store = CloudLibraryStore(api: api, files: files)
+        await store.reloadSaved()
+        let collection = CloudCollection(id: UUID(), title: "以前のまとめ", members: [item])
+        XCTAssertEqual(store.members(of: collection), [item])
+        XCTAssertEqual(store.lifecycle.status(item.id), .active)
+        let legacy = try await files.hiddenDiagrams()
+        XCTAssertEqual(legacy, [item])
+    }
+    @MainActor
     func testLocalCleanupKeepsPreferencesAndOnlineSource() async throws {
         let (files, root) = try temporaryStore(); defer { try? FileManager.default.removeItem(at: root) }
         let api = MockCloudAPI()

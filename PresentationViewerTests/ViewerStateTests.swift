@@ -1,9 +1,54 @@
 import XCTest
 import PDFKit
 import UIKit
+import SwiftUI
 @testable import PresentationViewer
 
 final class ViewerStateTests: XCTestCase {
+    @MainActor
+    func testUnifiedReaderOpensPDFAsSinglePageWithoutStartAction() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pdf")
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertTrue(try makePDF().write(to: url))
+        let document = OpenedDocument(url: url, name: "Reader", format: .pdf, accessURL: url, scoped: false)
+        let host = UIHostingController(rootView: DocumentViewer(document: document))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 844, height: 390))
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        host.view.layoutIfNeeded()
+        let ready = expectation(description: "SwiftUI mounted PDF canvas")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { ready.fulfill() }
+        await fulfillment(of: [ready], timeout: 2)
+        func findPDF(_ view: UIView) -> PDFView? {
+            if let pdf = view as? PDFView { return pdf }
+            return view.subviews.compactMap { findPDF($0) }.first
+        }
+        let pdf = try XCTUnwrap(findPDF(host.view))
+        XCTAssertEqual(pdf.displayMode, .singlePage)
+        XCTAssertEqual(pdf.document?.pageCount, 3)
+        XCTAssertFalse(pdf.displaysPageBreaks)
+    }
+    @MainActor
+    func testImageZoomReportsPanGuardAndReset() async {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 960, height: 540)).image { $0.fill(CGRect(x:0,y:0,width:960,height:540)) }
+        let view = ZoomingImageView(image: image, onTap: {})
+        view.frame = CGRect(x:0,y:0,width:480,height:270); view.layoutIfNeeded()
+        var zoomed = false
+        view.onZoomChanged = { zoomed = $0 }
+        view.setZoomScale(view.minimumZoomScale * 2, animated:false)
+        view.scrollViewDidZoom(view)
+        let scaled = expectation(description: "zoom reported")
+        DispatchQueue.main.async { scaled.fulfill() }
+        await fulfillment(of:[scaled], timeout:2)
+        XCTAssertTrue(zoomed)
+        view.setZoomScale(view.minimumZoomScale, animated:false)
+        view.scrollViewDidZoom(view)
+        let reset = expectation(description: "fit reported")
+        DispatchQueue.main.async { reset.fulfill() }
+        await fulfillment(of:[reset], timeout:2)
+        XCTAssertFalse(zoomed)
+    }
+
     func testFullscreenOrientationFollowsIllustrationAspectRatio() {
         XCTAssertEqual(ViewerDisplayIntent.illustration.orientation(for: CGSize(width: 1600, height: 900)), .landscape)
         XCTAssertEqual(ViewerDisplayIntent.illustration.orientation(for: CGSize(width: 900, height: 1600)), .portrait)

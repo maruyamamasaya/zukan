@@ -19,3 +19,7 @@
 共通モデル/APIクライアント/削除確認と端末コピーの削除通知処理も反映したが、BundleのLibraryLifecycleEnabledは既定無効のまま。ゴミ箱はサーバー反映待ちを表示する。S3完全削除と端末間のゴミ箱操作は今回有効化していない。AWS/本番APIを変更していない。
 
 本番有効化前の残件は、隣接diagram-design-system/docs/shared-library-trash.mdを正とする。制作原本は自動削除の対象外。
+
+## 共通ゴミ箱の本番有効化（2026-10-19）
+
+本人承認後、隣接diagram-design-systemの本番APIで検証専用資料1件の移動/復元/完全削除/再試行を確認し、既存catalog53件保持と検証ファイル残存0を確認。元zukan Info.plistのLibraryLifecycleEnabledをtrueとした。CloudLibraryAPIのsupportsLifecycleにより本番HTTPSだけを有効にし、デモ接続は同期APIを要求しない。修正後71 XCTest失敗0、署名実機build/codesign成功、Vesperaへ既存bundleを更新・起動済み。端末の保存コピーは永続deleted通知を保存後に削除し、オフライン端末では次の接続時に処理する。実機の手操作による往復は本人確認待ち。詳細は隣接repo docs/shared-trash-deployment.md、ログはoutputs/shared-trash-readiness/。

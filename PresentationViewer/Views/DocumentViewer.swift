@@ -12,16 +12,11 @@ struct DocumentViewer: View {
     @StateObject private var pdfSession: PDFReadingSession
     @ObservedObject private var external = ExternalDisplayCoordinator.shared
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    @State private var readerPanelVisible = false
-    private var phoneUI: Bool { UIDevice.current.userInterfaceIdiom == .phone }
-    private var compactUI: Bool { phoneUI || horizontalSizeClass == .compact || dynamicTypeSize.isAccessibilitySize }
-    @State private var slideRailVisible = true
-    @State private var toolbarVisible = true
-    @State private var thumbnailPreference: Bool?
-    @State private var imagePresenting = false
-    @StateObject private var orientation = ViewerOrientationController()
+    @State private var controlsVisible = true
+    @State private var slideRailVisible = false
+    @State private var canvasZoomed = false
+    @State private var titleVisible = false
+    private var isPhone: Bool { UIDevice.current.userInterfaceIdiom == .phone && document.format != .pptx }
 
     init(document: OpenedDocument, libraryActions: AnyView? = nil, imagePages: ImagePageControls? = nil, displayIntent: ViewerDisplayIntent = .presentation, externalPageNavigation: Bool = false) {
         self.document = document
@@ -29,212 +24,116 @@ struct DocumentViewer: View {
         self.imagePages = imagePages
         self.externalPageNavigation = externalPageNavigation
         self.displayIntent = displayIntent
-        _pdfSession = StateObject(wrappedValue: PDFReadingSession(url: document.format == .pdf ? document.url : nil))
+        let session = PDFReadingSession(url: document.format == .pdf ? document.url : nil)
+        session.isPresenting = true
+        _pdfSession = StateObject(wrappedValue: session)
     }
-
-    private var isImage: Bool { [.png, .jpg, .jpeg].contains(document.format) }
-    private var canPresent: Bool { isImage || (document.format == .pdf && pdfSession.pageCount > 0) }
-    private var presenting: Bool { pdfSession.isPresenting || imagePresenting }
-    private var startTitle: String { displayIntent == .illustration ? "全画面表示" : "プレゼンを開始" }
-    private var endTitle: String { displayIntent == .illustration ? "全画面表示を終了" : "プレゼンを終了" }
-    private var thumbnailsVisible: Bool { thumbnailPreference ?? (horizontalSizeClass == .regular) }
-
-    var body: some View {
-        NavigationStack {
-            HStack(spacing: 0) {
-                if presenting && displayIntent == .presentation {
-                    VStack {
-                        Text("\(currentPage + 1)/\(totalPages)").font(.system(size: 11, weight: .medium).monospacedDigit())
-                            .minimumScaleFactor(0.7).lineLimit(1).frame(height: 44)
-                        Spacer(minLength: 0)
-                        if hasPages { pageButton(previous: true) }
-                        Spacer(minLength: 0)
-                        Button { slideRailVisible.toggle() } label: {
-                            Image(systemName: slideRailVisible ? "sidebar.left" : "list.bullet").frame(width: 44, height: 44)
-                        }.accessibilityLabel(slideRailVisible ? "スライド一覧を閉じる" : "スライド一覧を開く")
-                    }.frame(width: 52).foregroundStyle(.white.opacity(0.8))
-                    if slideRailVisible { slideSidebar.frame(width: 76) }
-                }
-                documentCanvas.frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
-                        guard presenting && displayIntent == .presentation,
-                              abs(value.translation.width) > 60,
-                              abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }
-                        movePage(previous: value.translation.width > 0)
-                    })
-                if presenting && displayIntent == .presentation {
-                    VStack {
-                        Button { if phoneUI { dismiss() } else { endPresentation() } } label: { Image(systemName: "xmark").frame(width: 44, height: 44) }
-                            .accessibilityLabel(phoneUI ? "資料を閉じる" : endTitle).keyboardShortcut(.cancelAction)
-                        Spacer(minLength: 0)
-                        if hasPages { pageButton(previous: false) }
-                        Spacer(minLength: 0)
-                        Color.clear.frame(height: 44)
-                    }.frame(width: 44).foregroundStyle(.white.opacity(0.8))
-                }
-            }
-            .background(presenting ? Color.black : Color(uiColor: .systemBackground))
-            .navigationTitle(document.name)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("閉じる") { dismiss() }.keyboardShortcut(.cancelAction)
-                }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    if let libraryActions {
-                        libraryActions
-                        Menu {
-                            if document.format == .pdf, pdfSession.pageCount > 0 {
-                                Button(thumbnailsVisible ? "ページ一覧を隠す" : "ページ一覧を表示") { thumbnailPreference = !thumbnailsVisible }
-                            }
-                            Button(startTitle) { beginPresentation() }.disabled(!canPresent)
-                        } label: { Label("表示設定", systemImage: "slider.horizontal.3") }
-                    } else {
-                    if document.format == .pdf, pdfSession.pageCount > 0 {
-                        Button {
-                            thumbnailPreference = !thumbnailsVisible
-                        } label: {
-                            Label(thumbnailsVisible ? "ページ一覧を隠す" : "ページ一覧を表示", systemImage: "square.grid.2x2")
-                        }
-                    }
-                    Menu {
-                        Button(startTitle, systemImage: displayIntent == .illustration ? "arrow.up.left.and.arrow.down.right" : "play.rectangle") { beginPresentation() }
-                            .disabled(!canPresent)
-                        if document.format == .pdf {
-                            Label(external.connected ? "外部画面に接続済み" : "外部画面未接続", systemImage: "display")
-                        }
-                    } label: { Label("プレゼン", systemImage: "play.rectangle") }
-                    if isImage {
-                        Button(action: toggleControls) {
-                            Label("ツールバーを隠す", systemImage: "arrow.up.left.and.arrow.down.right")
-                        }
-                        .keyboardShortcut("t", modifiers: .command)
-                    }
-                    }
-                }
-            }
-            .toolbar(!compactUI && toolbarVisible && !presenting ? .visible : .hidden, for: .navigationBar)
-            .ignoresSafeArea(presenting && displayIntent == .illustration ? .all : [], edges: .all)
-            .overlay {
-                if !presenting && hasPages {
-                    HStack { pageButton(previous: true); Spacer(); pageButton(previous: false) }.padding(.horizontal, 8)
-                }
-            }
-            .overlay(alignment: .topTrailing) {
-                if presenting && displayIntent == .illustration {
-                    Button { if phoneUI { dismiss() } else { endPresentation() } } label: { Image(systemName: "xmark") }
-                        .accessibilityLabel(phoneUI ? "資料を閉じる" : endTitle).keyboardShortcut(.cancelAction)
-                        .buttonStyle(PresentationSideButtonStyle())
-                        .foregroundStyle(.white.opacity(0.6)).background(.black.opacity(0.12), in: Capsule())
-                        .padding(8)
-                }
-            }
-            .overlay(alignment: .trailing) {
-                if compactUI && !presenting {
-                    GeometryReader { geometry in
-                        ZStack(alignment: .trailing) {
-                            if readerPanelVisible {
-                                Button { withAnimation { readerPanelVisible = false } } label: { Color.black.opacity(0.32).ignoresSafeArea() }
-                                    .buttonStyle(.plain).accessibilityLabel("資料メニューを閉じる")
-                                VStack(spacing: 0) {
-                                    HStack {
-                                        Text("資料メニュー").font(.headline)
-                                        Spacer()
-                                        Button { withAnimation { readerPanelVisible = false } } label: { Image(systemName: "xmark").frame(width: 44, height: 44) }
-                                            .accessibilityLabel("資料メニューを閉じる")
-                                    }.padding(.horizontal, 16)
-                                    ScrollView {
-                                        VStack(alignment: .leading, spacing: 16) {
-                                            Text(document.name).font(.headline).textSelection(.enabled)
-                                            Text(document.format.rawValue.uppercased()).font(.caption).foregroundStyle(.secondary)
-                                            Divider()
-                                            if let libraryActions { libraryActions }
-                                            if document.format == .pdf && pdfSession.pageCount > 0 {
-                                                Button(thumbnailsVisible ? "ページ一覧を隠す" : "ページ一覧を表示") { thumbnailPreference = !thumbnailsVisible; readerPanelVisible = false }
-                                                    .frame(minHeight: 44)
-                                            }
-                                            Button(startTitle) { readerPanelVisible = false; beginPresentation() }.frame(minHeight: 44).disabled(!canPresent)
-                                        }.padding(16)
-                                    }
-                                }.frame(width: min(dynamicTypeSize.isAccessibilitySize ? 340 : 260, geometry.size.width * 0.80)).background(.regularMaterial)
-                                    .transition(.move(edge: .trailing))
-                                    .simultaneousGesture(DragGesture().onEnded { if $0.translation.width > 60 && abs($0.translation.height) < 40 { withAnimation { readerPanelVisible = false } } })
-                            } else {
-                                VStack { Spacer()
-                                    Button { withAnimation { readerPanelVisible = true } } label: {
-                                        Image(systemName: "ellipsis").font(.system(size: 19, weight: .medium))
-                                            .frame(width: 48, height: 48).background(.regularMaterial, in: Circle())
-                                            .shadow(color: .black.opacity(0.15), radius: 5, y: 2)
-                                    }.buttonStyle(.plain).accessibilityLabel("資料メニューを開く")
-                                        .padding(.trailing, 12).padding(.bottom, 8)
-                                }
-                            }
-                        }.frame(width: geometry.size.width, height: geometry.size.height, alignment: .trailing)
-                    }
-                }
-            }
-            .overlay(alignment: .topLeading) {
-                if compactUI && !presenting {
-                    Button { dismiss() } label: {
-                        Label("閉じる", systemImage: "xmark")
-                            .font(.system(size: 14, weight: .medium))
-                            .padding(.horizontal, 12).frame(minHeight: 48)
-                            .background(.regularMaterial, in: Capsule())
-                    }.buttonStyle(.plain).accessibilityLabel("資料を閉じる")
-                        .keyboardShortcut(.cancelAction).padding(8)
-                }
-            }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if !compactUI && !presenting && !toolbarVisible {
-                    HStack {
-                        Button("閉じる") { dismiss() }.keyboardShortcut(.cancelAction)
-                        Button { toolbarVisible = true } label: { Label("操作を表示", systemImage: "ellipsis") }
-                    }.buttonStyle(.bordered).padding(8).background(.regularMaterial)
-                }
-            }
-        }
-
-        .statusBarHidden(presenting)
-        .background(ViewerOrientationAnchor(controller: orientation).frame(width: 0, height: 0))
-        .alert("画面の向きを変更できません", isPresented: Binding(
-            get: { orientation.errorMessage != nil },
-            set: { if !$0 { orientation.errorMessage = nil } }
-        )) {
-            Button("OK", role: .cancel) { orientation.errorMessage = nil }
-        } message: {
-            Text(orientation.errorMessage ?? "")
-        }
-        .onDisappear {
-            external.end(pdfSession)
-            if phoneUI { orientation.request(.landscape, allowingRotation: true) }
-        }
-    }
-
-    @ViewBuilder private var documentCanvas: some View {
-                switch document.format {
-                case .pptx:
-                    if QLPreviewController.canPreview(document.url as NSURL) {
-                        QuickLookView(url: document.url)
-                    } else {
-                        ViewerErrorView(message: "このPPTXはQuick Lookで表示できません。PDFに書き出してお試しください。")
-                    }
-                case .pdf:
-                    PDFDocumentView(session: pdfSession, thumbnailsVisible: thumbnailsVisible)
-                        .simultaneousGesture(TapGesture().onEnded { if !presenting { beginPresentation() } })
-                case .svg: ViewerErrorView(message: "SVGの表示は終了しました。PDFまたはPNGを使用してください。")
-                case .png, .jpg, .jpeg:
-                    ImageDocumentView(url: document.url, presenting: imagePresenting, onTap: toggleControls).id(document.url)
-                }
-    }
-
-    private var hasPages: Bool {
-        if externalPageNavigation { return imagePages != nil }
-        return presenting && displayIntent == .presentation && (document.format == .pdf || imagePages != nil)
-    }
-
+    private var supportsPaging: Bool { document.format == .pdf || imagePages != nil }
     private var currentPage: Int { document.format == .pdf ? pdfSession.pageIndex : imagePages?.pageIndex ?? 0 }
     private var totalPages: Int { document.format == .pdf ? pdfSession.pageCount : imagePages?.pageCount ?? 1 }
+    private var showControls: Bool { controlsVisible || document.format == .pptx }
 
+    var body: some View {
+        Group {
+            if isPhone {
+                HStack(spacing: 0) {
+                    readingCanvas
+                    phoneControls.frame(width: 60)
+                        .opacity(showControls ? 1 : 0)
+                        .allowsHitTesting(showControls).accessibilityHidden(!showControls)
+                }
+            } else {
+                standardReader
+            }
+        }
+        .background(Color.black).foregroundStyle(.white).preferredColorScheme(.dark)
+        .statusBarHidden(true)
+        .onAppear { if document.format == .pdf { external.begin(pdfSession) } }
+        .onDisappear { external.end(pdfSession) }
+    }
+
+    private var readingCanvas: some View {
+        HStack(spacing: 0) {
+            if controlsVisible && slideRailVisible && supportsPaging { slideSidebar.frame(width: 76) }
+            documentCanvas.frame(maxWidth: .infinity, maxHeight: .infinity)
+                .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
+                    guard supportsPaging, !canvasZoomed,
+                          abs(value.translation.width) > 60,
+                          abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }
+                    movePage(previous: value.translation.width > 0)
+                })
+        }
+    }
+
+    private var phoneControls: some View {
+        VStack(spacing: 0) {
+            Button { dismiss() } label: { Image(systemName: "xmark").frame(width: 44, height: 44) }
+                .accessibilityLabel("資料を閉じる").keyboardShortcut(.cancelAction)
+            Button { titleVisible = true } label: { Image(systemName: "info.circle").frame(width: 44, height: 44) }
+                .accessibilityLabel("資料名：\(document.name)")
+                .popover(isPresented: $titleVisible) {
+                    Text(document.name).font(.headline).padding().presentationCompactAdaptation(.popover)
+                }
+            if let libraryActions { libraryActions }
+            if supportsPaging {
+                Button { slideRailVisible.toggle() } label: { Image(systemName: "sidebar.left").frame(width: 44, height: 44) }
+                    .accessibilityLabel(slideRailVisible ? "ページ一覧を閉じる" : "ページ一覧を開く")
+            }
+            Spacer(minLength: 0)
+            if supportsPaging {
+                pageButton(previous: true)
+                Text("\(min(currentPage + 1, totalPages))/\(totalPages)")
+                    .font(.caption.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.7)
+                    .accessibilityLabel("全\(totalPages)ページ中の\(currentPage + 1)ページ目")
+                pageButton(previous: false)
+            }
+        }.frame(maxHeight: .infinity)
+    }
+
+    private var standardReader: some View {
+        VStack(spacing: 0) {
+            // Reserve the controls' space even while hidden, so a tap never resets zoom.
+            header.opacity(showControls ? 1 : 0).allowsHitTesting(showControls).accessibilityHidden(!showControls)
+            readingCanvas
+            if supportsPaging {
+                HStack(spacing: 12) {
+                    Spacer(minLength: 0)
+                    pageButton(previous: true)
+                    Text("\(min(currentPage + 1, totalPages))/\(totalPages)")
+                        .font(.subheadline.monospacedDigit()).accessibilityLabel("全\(totalPages)ページ中の\(currentPage + 1)ページ目")
+                    pageButton(previous: false)
+                }.padding(.horizontal, 20).frame(maxWidth: .infinity).frame(height: 64)
+                    .opacity(controlsVisible ? 1 : 0).allowsHitTesting(controlsVisible).accessibilityHidden(!controlsVisible)
+            }
+        }
+    }
+    private var header: some View {
+        HStack(spacing: 12) {
+            Button { dismiss() } label: { Image(systemName: "xmark").frame(width: 44, height: 44) }
+                .accessibilityLabel("資料を閉じる").keyboardShortcut(.cancelAction)
+            Text(document.name).font(.subheadline).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+            if let libraryActions { libraryActions }
+            if supportsPaging {
+                Button { slideRailVisible.toggle() } label: {
+                    Image(systemName: "sidebar.left").frame(width: 44, height: 44)
+                }.accessibilityLabel(slideRailVisible ? "ページ一覧を閉じる" : "ページ一覧を開く")
+            }
+        }.padding(.horizontal, 8).frame(minHeight: 48).background(.ultraThinMaterial)
+    }
+    private func toggleControls() { withAnimation(.easeInOut(duration: 0.15)) { controlsVisible.toggle() } }
+    @ViewBuilder private var documentCanvas: some View {
+        switch document.format {
+        case .pptx:
+            if QLPreviewController.canPreview(document.url as NSURL) { QuickLookView(url: document.url) }
+            else { ViewerErrorView(message: "このPPTXはQuick Lookで表示できません。PDFを使用してください。") }
+        case .pdf:
+            PDFDocumentView(session: pdfSession, thumbnailsVisible: false, onZoomChanged: { canvasZoomed = $0 })
+                .simultaneousGesture(TapGesture().onEnded { toggleControls() })
+        case .svg: ViewerErrorView(message: "SVGの表示は終了しました。PDFまたはPNGを使用してください。")
+        case .png, .jpg, .jpeg:
+            ImageDocumentView(url: document.url, presenting: true, onTap: toggleControls, onZoomChanged: { canvasZoomed = $0 }).id(document.url)
+        }
+    }
     private var slideSidebar: some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
@@ -279,52 +178,19 @@ struct DocumentViewer: View {
 
     private func pageButton(previous: Bool) -> some View {
         Button { movePage(previous: previous) } label: { Image(systemName: previous ? "chevron.left" : "chevron.right") }
-        .accessibilityLabel(previous ? "前のページ" : "次のページ")
-        .keyboardShortcut(previous ? .leftArrow : .rightArrow, modifiers: [])
-        .disabled(document.format == .pdf && !externalPageNavigation
-            ? (previous ? pdfSession.pageIndex == 0 : pdfSession.pageIndex + 1 >= pdfSession.pageCount)
-            : (previous ? imagePages?.canPrevious != true : imagePages?.canNext != true))
-        .font(.system(size: 17, weight: .semibold))
-        .buttonStyle(PresentationSideButtonStyle())
-        .foregroundStyle(.white.opacity(0.6)).background(.black.opacity(0.12), in: Capsule())
+            .accessibilityLabel(previous ? "前のページ" : "次のページ")
+            .keyboardShortcut(previous ? .leftArrow : .rightArrow, modifiers: [])
+            .disabled(document.format == .pdf && !externalPageNavigation
+                ? (previous ? currentPage == 0 : currentPage + 1 >= totalPages)
+                : (previous ? imagePages?.canPrevious != true : imagePages?.canNext != true))
+            .buttonStyle(PresentationSideButtonStyle())
     }
-
     private func movePage(previous: Bool) {
         if document.format == .pdf && !externalPageNavigation {
-            guard previous ? currentPage > 0 : currentPage + 1 < totalPages else { return }
             pdfSession.movePage(previous ? -1 : 1)
         } else if previous {
             if imagePages?.canPrevious == true { imagePages?.previous() }
         } else if imagePages?.canNext == true { imagePages?.next() }
-    }
-
-    private func toggleControls() {
-        withAnimation(.easeInOut(duration: 0.2)) {
-            if !presenting { beginPresentation() }
-        }
-    }
-
-    private func beginPresentation() {
-        guard canPresent else { return }
-        let contentSize: CGSize?
-        if document.format == .pdf {
-            contentSize = pdfSession.document?.page(at: pdfSession.pageIndex)?.bounds(for: .mediaBox).size
-        } else {
-            contentSize = UIImage(contentsOfFile: document.url.path)?.size
-        }
-        if phoneUI { orientation.request(displayIntent.orientation(for: contentSize)) }
-        if document.format == .pdf {
-            pdfSession.isPresenting = true
-            external.begin(pdfSession)
-        } else { imagePresenting = true }
-    }
-
-    private func endPresentation() {
-        external.end(pdfSession)
-        pdfSession.isPresenting = false
-        imagePresenting = false
-        toolbarVisible = true
-        if phoneUI { orientation.request(.landscape, allowingRotation: true) }
     }
 }
 
@@ -374,9 +240,12 @@ struct ViewerErrorView: View {
 private struct PresentationSideButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         // Generous side controls; the full rectangle participates in hit testing.
-        configuration.label.frame(width: 44, height: 44)
+        configuration.label
+            .font(.system(size: 18, weight: .semibold))
+            .frame(width: UIDevice.current.userInterfaceIdiom == .pad ? 64 : 44, height: UIDevice.current.userInterfaceIdiom == .pad ? 52 : 44)
             .contentShape(Rectangle())
-            .background(configuration.isPressed ? Color.white.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 16))
+            .background(configuration.isPressed ? Color.white.opacity(0.3) : Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.24), lineWidth: 1))
     }
 }
 
