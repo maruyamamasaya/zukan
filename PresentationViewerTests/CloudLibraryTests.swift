@@ -231,10 +231,61 @@ final class CloudLibraryTests: XCTestCase {
             XCTAssertNil(StorageCostEstimate.monthlyYen(gib: invalid, usdPerGiB: 0.025, yenPerUSD: 150, taxPercent: 10))
         }
     }
+    func testS3CapacityUsesAuthenticatedEndpointThroughProtocol() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [OIDCTestProtocol.self]
+        OIDCTestProtocol.respond = { request in
+            XCTAssertEqual(request.url?.path, "/v1/storage-capacity")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer capacity-test")
+            return Data("{\"scope\":\"dedicated-bucket-all-versions\",\"sizeBytes\":12345,\"objectCount\":8,\"deleteMarkerCount\":2,\"standardOnly\":true,\"updatedAt\":\"2026-10-19T00:00:00Z\"}".utf8)
+        }
+        defer { OIDCTestProtocol.respond = nil }
+        let api: any CloudLibraryAPI = try HTTPSCloudAPI(baseURL: URL(string: "https://example.com")!, allowedArtifactHosts: ["example.com"], tokens: CapacityToken(), sessionConfiguration: config)
+        let value = try await api.capacity()
+        XCTAssertEqual(value.sizeBytes, 12345)
+        XCTAssertEqual(value.documentCount, 8)
+        XCTAssertEqual(value.deleteMarkerCount, 2)
+        XCTAssertTrue(value.standardOnly)
+        OIDCTestProtocol.respond = { _ in Data("{\"scope\":\"latest-only\",\"sizeBytes\":12345,\"objectCount\":8,\"deleteMarkerCount\":0,\"standardOnly\":true,\"updatedAt\":\"2026-10-19T00:00:00Z\"}".utf8) }
+        do { _ = try await api.capacity(); XCTFail("Wrong capacity scope accepted") } catch {}
+    }
+    func testMonthlyBillingEndpointAllocationAndExactTotals() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [OIDCTestProtocol.self]
+        var payload: [String: Any] = [
+            "status": "ready", "month": "2026-10", "nextRefreshAt": "2026-10-26T00:00:00Z",
+            "report": ["month": "2026-10", "periodStart": "2026-10-01", "periodEndExclusive": "2026-10-20", "fetchedAt": "2026-10-19T00:00:00Z",
+                       "estimated": true, "currency": "USD", "metric": "UnblendedCost",
+                       "diagram": [["service": "Amazon Simple Storage Service", "usageType": "APN1-DataTransfer-Out-Bytes", "amountUSD": "0.100000000001"]],
+                       "common": [["service": "Amazon Cognito", "usageType": "MAU", "amountUSD": "-0.01"]],
+                       "diagramUSD": "0.100000000001", "commonUSD": "-0.01"]]
+        OIDCTestProtocol.respond = { request in
+            XCTAssertEqual(request.url?.path, "/v1/monthly-billing")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer capacity-test")
+            return try JSONSerialization.data(withJSONObject: payload)
+        }
+        defer { OIDCTestProtocol.respond = nil }
+        let api: any CloudLibraryAPI = try HTTPSCloudAPI(baseURL: URL(string: "https://example.com")!, allowedArtifactHosts: ["example.com"], tokens: CapacityToken(), sessionConfiguration: config)
+        let result = try await api.monthlyBilling()
+        XCTAssertEqual(result.report?.diagram.first?.category, "通信料")
+        XCTAssertEqual(result.report?.common.first?.category, "認証")
+        XCTAssertEqual(result.report?.diagram.first?.amount, Decimal(string: "0.100000000001"))
+        var bad = payload["report"] as! [String: Any]; bad["diagramUSD"] = "0"; payload["report"] = bad
+        do { _ = try await api.monthlyBilling(); XCTFail("Mismatched total accepted") } catch {}
+        payload = ["status": "allocationPending", "month": "2026-10"]
+        let pending = try await api.monthlyBilling()
+        XCTAssertNil(pending.report)
+        payload = ["status": "ready", "month": "2026-10"]
+        do { _ = try await api.monthlyBilling(); XCTFail("Missing report shown as zero") } catch {}
+    }
     func testCostHistoryPersistsAndIsIsolated() async throws {
         let (files, root) = try temporaryStore(); defer { try? FileManager.default.removeItem(at: root) }
         let sample = StorageCostSnapshot(date: Date(), bytes: 1073741824, monthlyYen: 4.125)
+        try JSONEncoder().encode([sample]).write(to: root.appendingPathComponent("saved/storage-cost-history.json"))
+        let legacy = try await files.costHistory()
+        XCTAssertTrue(legacy.isEmpty)
         _ = try await files.recordCost(sample)
+        _ = try await files.recordCost(sample) // Same server-cached measurement must not duplicate chart IDs.
         try await files.clearLocalDocuments()
         let reloaded = try await files.costHistory()
         XCTAssertEqual(reloaded.count, 1)
@@ -1092,3 +1143,5 @@ extension CloudLibraryTests {
         let stillDeleted = try await files.lifecycleIndex(); XCTAssertEqual(stillDeleted.status(diagram.id), .deleted)
     }
 }
+
+private struct CapacityToken: CloudAccessTokenProvider { func accessToken() async throws -> String { "capacity-test" } }

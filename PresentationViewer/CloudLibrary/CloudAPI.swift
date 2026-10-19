@@ -2,6 +2,8 @@ import Foundation
 import LibraryOrganization
 
 protocol CloudLibraryAPI: Sendable {
+    func monthlyBilling() async throws -> MonthlyBillingReply
+    func capacity() async throws -> CloudCapacity
     var supportsLifecycle: Bool { get }
     func lifecycleSnapshot() async throws -> LibraryLifecycleSnapshot
     func moveToTrash(_ diagram: CloudDiagram, revision: Int, trashed: Bool) async throws -> LibraryLifecycleEntry
@@ -15,6 +17,7 @@ protocol CloudLibraryAPI: Sendable {
 }
 
 extension CloudLibraryAPI {
+    func monthlyBilling() async throws -> MonthlyBillingReply { throw CloudError.unavailable }
     var supportsLifecycle: Bool { false }
     func lifecycleSnapshot() async throws -> LibraryLifecycleSnapshot { throw CloudError.unavailable }
     func moveToTrash(_ diagram: CloudDiagram, revision: Int, trashed: Bool) async throws -> LibraryLifecycleEntry { throw CloudError.unavailable }
@@ -35,6 +38,8 @@ struct CloudCapacity: Sendable {
     let documentCount: Int
     let sizeBytes: Int64
     let updatedAt: Date
+    var standardOnly: Bool = true
+    var deleteMarkerCount: Int = 0
 }
 
 extension CloudLibraryAPI {
@@ -134,11 +139,11 @@ struct HTTPSCloudAPI: CloudLibraryAPI {
     let allowedArtifactHosts: Set<String>
     let tokens: any CloudAccessTokenProvider
     private let session: URLSession
-    init(baseURL: URL, allowedArtifactHosts: Set<String>, tokens: any CloudAccessTokenProvider) throws {
+    init(baseURL: URL, allowedArtifactHosts: Set<String>, tokens: any CloudAccessTokenProvider, sessionConfiguration: URLSessionConfiguration = .ephemeral) throws {
         guard baseURL.scheme == "https", baseURL.host != nil, baseURL.user == nil, baseURL.password == nil,
               baseURL.query == nil, baseURL.fragment == nil, !allowedArtifactHosts.isEmpty else { throw CloudError.invalidResponse }
         self.baseURL = baseURL; self.allowedArtifactHosts = allowedArtifactHosts; self.tokens = tokens
-        let config = URLSessionConfiguration.ephemeral
+        let config = sessionConfiguration
         config.httpShouldSetCookies = false; config.urlCache = nil; config.timeoutIntervalForRequest = 30
         session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
     }
@@ -157,6 +162,27 @@ struct HTTPSCloudAPI: CloudLibraryAPI {
         var data = Data()
         for try await byte in bytes { if data.count >= 1_000_000 { throw CloudError.invalidResponse }; data.append(byte) }
         return try JSONDecoder().decode(T.self, from: data)
+    }
+    func monthlyBilling() async throws -> MonthlyBillingReply {
+        let value: MonthlyBillingReply = try await request("v1/monthly-billing")
+        try value.validate()
+        return value
+    }
+    func capacity() async throws -> CloudCapacity {
+        struct Payload: Decodable {
+            let scope: String
+            let sizeBytes: Int64
+            let objectCount: Int
+            let deleteMarkerCount: Int
+            let standardOnly: Bool
+            let updatedAt: String
+        }
+        let result: Payload = try await request("v1/storage-capacity")
+        guard result.scope == "dedicated-bucket-all-versions", result.sizeBytes >= 0,
+              result.objectCount >= 0, result.deleteMarkerCount >= 0,
+              let date = cloudDate(result.updatedAt), date <= Date().addingTimeInterval(60) else { throw CloudError.invalidResponse }
+        return CloudCapacity(documentCount: result.objectCount, sizeBytes: result.sizeBytes, updatedAt: date,
+                             standardOnly: result.standardOnly, deleteMarkerCount: result.deleteMarkerCount)
     }
     func list(query: String, cursor: String?) async throws -> CloudList {
         try await list(query: query, cursor: cursor, scope: "all")
@@ -229,4 +255,73 @@ struct StorageCostSnapshot: Codable, Identifiable, Sendable {
     let date: Date
     let bytes: Int64
     let monthlyYen: Double
+}
+
+
+struct MonthlyBillingRow: Decodable, Identifiable, Sendable {
+    let service: String
+    let usageType: String
+    let amountUSD: String
+    var id: String { service + "\n" + usageType }
+    var amount: Decimal { Decimal(string: amountUSD, locale: Locale(identifier: "en_US_POSIX")) ?? 0 }
+    var category: String {
+        if usageType.localizedCaseInsensitiveContains("transfer") || usageType.localizedCaseInsensitiveContains("DataXfer") || service.localizedCaseInsensitiveContains("Data Transfer") { return "通信料" }
+        if service.localizedCaseInsensitiveContains("Cognito") { return "認証" }
+        if service.localizedCaseInsensitiveContains("API Gateway") || usageType.localizedCaseInsensitiveContains("Requests") { return "API・リクエスト" }
+        if service.localizedCaseInsensitiveContains("Lambda") { return "処理の実行" }
+        if service.localizedCaseInsensitiveContains("CloudWatch") { return "ログ・監視" }
+        if service.localizedCaseInsensitiveContains("S3") || service.localizedCaseInsensitiveContains("Simple Storage") { return "保存・S3その他" }
+        return "その他・調整"
+    }
+}
+struct MonthlyBillingReport: Decodable, Sendable {
+    let month: String
+    let periodStart: String
+    let periodEndExclusive: String
+    let fetchedAt: String
+    let estimated: Bool
+    let currency: String
+    let metric: String
+    let diagram: [MonthlyBillingRow]
+    let common: [MonthlyBillingRow]
+    let diagramUSD: String
+    let commonUSD: String
+    func validate() throws {
+        guard month.range(of: "^\\d{4}-\\d{2}$", options: .regularExpression) != nil,
+              periodStart == month + "-01", cloudDate(periodStart + "T00:00:00Z") != nil,
+              cloudDate(periodEndExclusive + "T00:00:00Z") != nil, periodEndExclusive > periodStart,
+              let fetched = cloudDate(fetchedAt), fetched <= Date().addingTimeInterval(60),
+              currency == "USD", metric == "UnblendedCost" else { throw CloudError.invalidResponse }
+        for (rows, total) in [(diagram, diagramUSD), (common, commonUSD)] {
+            guard rows.count <= 5000, Set(rows.map(\.id)).count == rows.count else { throw CloudError.invalidResponse }
+            var sum = Decimal.zero
+            for row in rows {
+                guard !row.service.isEmpty, row.service.count <= 256, row.usageType.count <= 256 else { throw CloudError.invalidResponse }
+                sum += try Self.amount(row.amountUSD)
+            }
+            guard sum == (try Self.amount(total)) else { throw CloudError.invalidResponse }
+        }
+    }
+    static func amount(_ text: String) throws -> Decimal {
+        guard text.range(of: "^-?\\d{1,12}(\\.\\d{1,12})?$", options: .regularExpression) != nil,
+              let value = Decimal(string: text, locale: Locale(identifier: "en_US_POSIX")), !value.isNaN else { throw CloudError.invalidResponse }
+        return value
+    }
+}
+struct MonthlyBillingReply: Decodable, Sendable {
+    let status: String
+    let month: String
+    let nextRefreshAt: String?
+    let report: MonthlyBillingReport?
+    func validate() throws {
+        guard ["ready", "pending", "allocationPending"].contains(status),
+              month.range(of: "^\\d{4}-\\d{2}$", options: .regularExpression) != nil else { throw CloudError.invalidResponse }
+        if status == "ready" {
+            guard let report, report.month == month, let nextRefreshAt, cloudDate(nextRefreshAt) != nil else { throw CloudError.invalidResponse }
+            try report.validate()
+        } else {
+            guard report == nil else { throw CloudError.invalidResponse }
+            if let nextRefreshAt, cloudDate(nextRefreshAt) == nil { throw CloudError.invalidResponse }
+        }
+    }
 }

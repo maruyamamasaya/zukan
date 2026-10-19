@@ -329,7 +329,6 @@ struct CloudLibraryView: View {
                 ForEach(CloudLibraryKind.allCases, id: \.rawValue) { value in
                     Button(value.title) { libraryDestination.wrappedValue = value.rawValue }
                 }
-                Button("ローカル資料") { libraryDestination.wrappedValue = "local" }
             } label: { Label("本棚", systemImage: "books.vertical").font(.subheadline.weight(.semibold)) }
             .frame(width: 130, alignment: .leading)
             VStack(alignment: .leading, spacing: 1) {
@@ -354,9 +353,8 @@ struct CloudLibraryView: View {
                     }
                     Button("絞り込みを解除") { selectedGroup = "すべて"; selectedTag = ""; query = "" }
                 }
-                libraryActions
             } label: { Image(systemName: selectedGroup != "すべて" || !selectedTag.isEmpty ? "line.3.horizontal.decrease.circle.fill" : "ellipsis").frame(width: 44, height: 44) }
-                .accessibilityLabel("絞り込み・管理・設定")
+                .accessibilityLabel("絞り込み")
         }.padding(.horizontal, 12).background(BookshelfMaterial())
         .overlay(alignment: .bottom) { Divider() }
     }
@@ -398,16 +396,19 @@ struct CloudLibraryView: View {
                         ForEach(CloudLibraryKind.allCases, id: \.rawValue) { value in
                             Button(value.title) { libraryDestination.wrappedValue = value.rawValue }
                         }
-                        Button("ローカル資料") { libraryDestination.wrappedValue = "local" }
-                    } label: { Label("本棚", systemImage: "books.vertical").font(.headline).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading) }
+                            } label: { Label("本棚", systemImage: "books.vertical").font(.headline).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading) }
                     Text(kind.title).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 8)
                 }
                 shelfRow("すべて", symbol: "books.vertical", value: "all")
                 shelfRow("未整理", symbol: "tray", value: "unfiled")
                 Text("フォルダ").font(.caption).foregroundStyle(.secondary).padding(.top, 14).padding(.horizontal, 8)
                 ForEach(store.organization.orderedFolders) { folder in
-                    shelfRow(store.folderPath(folder.id), symbol: "folder", value: folder.id.uuidString)
+                    shelfRow(folder.name, symbol: "folder", value: folder.id.uuidString)
+                        .padding(.leading, CGFloat(max(0, store.folderPath(folder.id).components(separatedBy: " / ").count - 1)) * 12)
+                        .accessibilityLabel(store.folderPath(folder.id))
                 }
+                Divider().padding(.vertical, 8)
+                shelfRow("ゴミ箱", symbol: "trash", value: "trash")
                 Menu {
                     Button("フォルダを作成", systemImage: "folder.badge.plus") { folderName = ""; showFolderDialog = true }
                     if let id = UUID(uuidString: selectedShelf) {
@@ -415,9 +416,9 @@ struct CloudLibraryView: View {
                             Task { if await store.removeFolder(id) { selectedShelf = "all" } }
                         }
                     }
-                } label: { Label("フォルダ管理", systemImage: "folder.badge.gearshape").font(.caption).frame(minHeight: 44) }
-                Divider().padding(.vertical, 8)
-                shelfRow("ゴミ箱", symbol: "trash", value: "trash")
+                    Divider()
+                    libraryActions
+                } label: { Label("本棚を管理", systemImage: "slider.horizontal.3").font(.caption).frame(minHeight: 44) }
             }.padding(8)
         }.background(BookshelfMaterial())
         .overlay(alignment: .trailing) { Divider() }
@@ -498,11 +499,11 @@ struct CloudLibraryView: View {
     }
     @ViewBuilder private var libraryActions: some View {
                     Button("整理情報の同期", systemImage: "icloud") { syncSetup = true }
-                    Button("同期の検証", systemImage: "arrow.triangle.2.circlepath") { Task { syncLab = await store.makeSyncLab() } }
+                    Menu("詳細") { Button("同期の検証", systemImage: "arrow.triangle.2.circlepath") { Task { syncLab = await store.makeSyncLab() } } }
                     if kind == .illustrations {
                         Button("図解をまとめる", systemImage: "rectangle.stack.badge.plus") { collectionDraft = CloudCollection(id: UUID(), title: "", members: []) }
                     }
-                    Button("保存料金シミュレーション", systemImage: "externaldrive") { showCapacity = true }
+                    Button("S3保存容量と月額費用", systemImage: "externaldrive") { showCapacity = true }
                     if let onSettings { Button("接続設定", systemImage: "gear") { onSettings() } }
                     if let onReauthenticate { Button("ログインし直す", systemImage: "person.crop.circle.badge.checkmark", action: onReauthenticate) }
                     if let onLogout { Button("ログアウト", systemImage: "rectangle.portrait.and.arrow.right") { onLogout() } }
@@ -740,42 +741,66 @@ private struct CloudCapacityView: View {
     @State private var loading = false
     @State private var errorMessage: String?
     @State private var historyError: String?
-    @State private var manual = false
-    @State private var gib = 10.0
-    @State private var rate = 0.025
-    @State private var exchange = 150.0
-    @State private var tax = 10.0
+    @State private var billing: MonthlyBillingReply?
+    @State private var billingLoading = false
+    @State private var billingError: String?
+    private let rate = 0.025
+    private let exchange = 150.0
+    private let tax = 10.0
     private var measuredGiB: Double { Double(capacity?.sizeBytes ?? 0) / 1_073_741_824 }
     private var estimate: Double? {
-        guard manual || capacity != nil else { return nil }
-        return StorageCostEstimate.monthlyYen(gib: manual ? gib : measuredGiB, usdPerGiB: rate, yenPerUSD: exchange, taxPercent: tax)
+        guard let capacity, capacity.standardOnly else { return nil }
+        return StorageCostEstimate.monthlyYen(gib: measuredGiB, usdPerGiB: rate, yenPerUSD: exchange, taxPercent: tax)
     }
     private func yen(_ amount: Double) -> String { amount.formatted(.currency(code: "JPY").precision(.fractionLength(2))) }
     var body: some View {
         NavigationStack {
             Form {
-                Section(production ? "登録資料の保存費（月額試算）" : "サンプルの保存費（月額試算）") {
+                Section(production ? "S3の保存費（月額目安）" : "サンプルの保存費（月額試算）") {
                     if let estimate { Text(yen(estimate) + "／月").font(.title.bold()).accessibilityLabel("月額試算 " + yen(estimate)) }
-                    else { Text("容量を取得するか、有効な条件を入力してください。") }
+                    else { Text("S3保存容量を取得すると月額目安を表示します。") }
                     if let capacity {
-                        LabeledContent("最新版の資料", value: "\(capacity.documentCount)件")
+                        LabeledContent(production ? "保存オブジェクト（全版）" : "サンプル資料", value: "\(capacity.documentCount)個")
+                        LabeledContent("削除マーカー", value: "\(capacity.deleteMarkerCount)個")
+                        if !capacity.standardOnly { Text("Standard以外の保存クラスを含むため、料金を算出できません。") }
                         LabeledContent("合計容量", value: ByteCountFormatter.string(fromByteCount: capacity.sizeBytes, countStyle: .binary))
                         LabeledContent("取得日時") { Text(capacity.updatedAt, format: .dateTime.year().month().day().hour().minute()) }
                     }
                     if loading { ProgressView("容量を集計しています…") }
                     if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
                     Button("容量を更新・履歴に記録") { Task { await refresh() } }.disabled(loading)
-                    Text("全ライブラリの最新版のPDF・PPTX・PNG等を集計。旧版・S3の過去バージョン・管理ファイル・ゴミ箱は対象外。S3全体の請求額ではありません。ファイル本体はダウンロードしません。")
+                    Text("専用S3バケットの全オブジェクト版・旧版・ゴミ箱・管理ファイルと削除マーカーを集計します。未完了のマルチパートアップロードは含みません。取得中の変更により差が生じる場合があります。ファイル本体はダウンロードしません。")
                     if !production { Text("サンプルです。実際のS3利用量ではありません。") }
                 }
-                Section("容量と料金の条件") {
-                    Toggle("容量を手入力する", isOn: $manual)
-                    if manual { numberField("保存容量（GiB）", value: $gib) }
-                    numberField("単価（USD／GiB・月）", value: $rate)
-                    numberField("為替（円／USD）", value: $exchange)
-                    numberField("税率（%）", value: $tax)
+                if production {
+                    Section("今月のAWS費用（請求データ）") {
+                        if let billing {
+                            Text("AWS請求月：" + billing.month + "（UTC）")
+                            if let report = billing.report {
+                                billingBreakdown("図鑑の費用（配賦確認分）", rows: report.diagram, total: report.diagramUSD)
+                                billingBreakdown("共通・未配賦", rows: report.common, total: report.commonUSD)
+                                if let date = cloudDate(report.fetchedAt) { LabeledContent("請求データ取得日時") { Text(date, format: .dateTime.year().month().day().hour().minute()) } }
+                                Text("集計期間：" + report.periodStart + " 〜 " + report.periodEndExclusive + " 未満（UTC）")
+                                Text(report.estimated ? "AWSの暫定額です。月末の確定請求とは異なる場合があります。" : "取得時点のAWS計上額です。今後の調整が反映される場合があります。")
+                            } else if billing.status == "allocationPending" {
+                                Text("費用の配賦設定を準備中です。図鑑の費用を0円とは判定していません。")
+                            } else {
+                                Text("今月の請求データは未取得です。取得中または取得に失敗したため、次回取得可能日時まで待ちます。")
+                            }
+                            if let text = billing.nextRefreshAt, let date = cloudDate(text) {
+                                LabeledContent("次回取得可能日時") { Text(date, format: .dateTime.year().month().day().hour().minute()) }
+                            }
+                        }
+                        if billingLoading { ProgressView("保存済み請求データを確認しています…") }
+                        if let billingError { Text(billingError).foregroundStyle(.red) }
+                        Button("請求データを確認") { Task { await refreshBilling() } }.disabled(billingLoading)
+                        Text("全端末でデータを共有し、有料のAWS照会は最短7日に1回です。更新可能日時を過ぎた後の画面表示で取得します。AWSの請求反映にも通常1日以上かかる場合があります。")
+                        Text("図鑑はProjectタグで確認できた分のみ。共通・未配賦はProjectタグがなく帰属を確認できない費用です。図鑑の過去費用や他用途の費用も含む場合があります。他プロジェクトのタグが付いた費用は対象外です。")
+                        Text("USDはAWS計上額。円表示は1 USD＝150円での参考換算で、税を追加加算しません。上の保存費の月額目安とは期間と計算方法が異なるため合算しません。")
+                    }
+                }
+                Section("料金の計算条件") {
                     Text("東京 S3 Standardの参考値：0.025 USD。為替150円・税10%は仮定です。1 GiB = 1,073,741,824 bytes。容量 × 単価 × 為替 × (1 + 税率 / 100)。50 TiBまでの単一料金帯の試算です。")
-                    Text("過去版・原本・プレビューなどを含む総量が分かる場合は手入力してください。手入力値は取得履歴には記録しません。")
                     Link("AWS公式の最新料金を確認", destination: URL(string: "https://aws.amazon.com/jp/s3/pricing/")!)
                 }
                 Section("取得時点の履歴（この端末・最大365回）") {
@@ -793,25 +818,50 @@ private struct CloudCapacityView: View {
                         Text("料金は各取得時の条件で記録。現在の条件変更で過去の試算は変わりません。")
                     }
                 }
-                Section("含まれない費用") {
+                Section("保存費の月額目安に含まれないもの") {
                     Text("ダウンロード通信料・APIリクエスト・認証等の費用、無料枠・クレジット・日割りは反映しません。現在の容量を1か月保持する仮定で、実際の請求や今月の累計ではありません。")
                 }
             }
-            .navigationTitle("保存料金シミュレーション")
+            .navigationTitle("S3保存容量と月額費用")
             .toolbar { Button("閉じる") { dismiss() } }
             .task {
                 do { history = try await files.costHistory() }
                 catch { historyError = "保存済み履歴を読み込めませんでした。" }
+                await refresh()
+                if production { await refreshBilling() }
             }
         }
     }
-    private func numberField(_ title: String, value: Binding<Double>) -> some View {
-        HStack {
-            Text(title)
-            Spacer()
-            TextField(title, value: value, format: .number)
-                .keyboardType(.decimalPad).multilineTextAlignment(.trailing)
-                .frame(minWidth: 80, maxWidth: 180)
+    private func billingBreakdown(_ title: String, rows: [MonthlyBillingRow], total: String) -> some View {
+        let amount = (try? MonthlyBillingReport.amount(total)) ?? 0
+        return DisclosureGroup {
+            if rows.isEmpty { Text("この条件でAWSが返した費用明細はありません。未計上分が残る場合があります。") }
+            ForEach(Array(Set(rows.map(\.category))).sorted(), id: \.self) { category in
+                let items = rows.filter { $0.category == category }
+                let subtotal = items.reduce(Decimal.zero) { $0 + $1.amount }
+                DisclosureGroup {
+                    ForEach(items) { row in
+                        LabeledContent(row.service + " / " + row.usageType, value: row.amount.formatted(.currency(code: "USD").precision(.fractionLength(4))))
+                    }
+                } label: { LabeledContent(category, value: subtotal.formatted(.currency(code: "USD").precision(.fractionLength(4)))) }
+            }
+        } label: {
+            VStack(alignment: .leading) {
+                Text(title).font(.headline)
+                Text(amount.formatted(.currency(code: "USD").precision(.fractionLength(4))) + "（約" + (amount * 150).formatted(.currency(code: "JPY").precision(.fractionLength(2))) + "）")
+            }
+        }
+    }
+    @MainActor private func refreshBilling() async {
+        guard !billingLoading else { return }
+        billingLoading = true; billingError = nil
+        defer { billingLoading = false }
+        do {
+            let result = try await api.monthlyBilling()
+            try Task.checkCancellation()
+            billing = result
+        } catch {
+            if !Task.isCancelled { billingError = billing == nil ? "今月のAWS費用を取得できませんでした。サーバーの対応状況と接続を確認してください。" : "請求データを更新できませんでした。前回の取得値を表示しています。" }
         }
     }
     @MainActor private func refresh() async {
@@ -822,15 +872,15 @@ private struct CloudCapacityView: View {
             let result = try await api.capacity()
             try Task.checkCancellation()
             capacity = result
-            guard let cost = StorageCostEstimate.monthlyYen(gib: Double(result.sizeBytes) / 1_073_741_824, usdPerGiB: rate, yenPerUSD: exchange, taxPercent: tax) else {
-                errorMessage = "容量は取得しました。料金条件を修正して再度記録してください。"; return
+            guard result.standardOnly, let cost = StorageCostEstimate.monthlyYen(gib: Double(result.sizeBytes) / 1_073_741_824, usdPerGiB: rate, yenPerUSD: exchange, taxPercent: tax) else {
+                errorMessage = "容量は取得しました。Standard以外の保存クラス、または50 TiB超のため料金を算出できません。"; return
             }
             do {
                 history = try await files.recordCost(StorageCostSnapshot(date: result.updatedAt, bytes: result.sizeBytes, monthlyYen: cost))
                 historyError = nil
             } catch { historyError = "容量は取得しましたが履歴を保存できませんでした。" }
         } catch {
-            if !Task.isCancelled { errorMessage = "更新できませんでした。表示中の容量は前回の取得値です。" }
+            if !Task.isCancelled { errorMessage = capacity == nil ? "S3保存容量を取得できませんでした。接続状態とサーバーの対応状況を確認してください。" : "更新できませんでした。表示中の容量は前回の取得値です。" }
         }
     }
 }
