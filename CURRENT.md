@@ -109,3 +109,7 @@ Phase 11B-3：実Cognito設定・S3公開ブロックを読取確認。本人登
 2026-10-19：常設フォルダ/薄い本棚バー/一行検索を元repoへ適用。既存署名build・codesignとVesperaへの上書き更新/起動成功。共通ゴミ箱は準備中で無効、AWS変更なし。[反映と検証](docs/mobile-bookshelf-deployment.md)。
 
 同版の最終検証：arm64 iPhone 17e/iOS 26.5 Simulatorで68 XCTest・失敗0。画面読み取りで新しい本棚構造を確認。画像目視は画面ツールtimeoutで未完了。Vesperaの更新版起動成功、本人による実機操作確認待ち。
+
+2026-10-19：iPad Miraへ端末指定署名build・インストール・起動成功。本人が本棚／本番ログイン／実資料一覧を確認。閲覧・回転・オフライン確認は継続中。[検証](docs/ipad-layout.md#miraへの実機反映2026-10-19)。
+
+2026-10-19：表紙PNGだけを閲覧一覧と見なしてPDF/残りPNGを隠す不具合を修正。オンラインは全manifest、オフラインのみ取得済みに限定。69 XCTest合格、iPad SimulatorでPDF表示・形式切替・PNGスワイプ2枚目/次ボタン3枚目を確認。[原因・検証](docs/reader-cover-cache-fix.md)。

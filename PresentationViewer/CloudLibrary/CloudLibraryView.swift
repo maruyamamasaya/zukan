@@ -603,12 +603,8 @@ struct CloudLibraryView: View {
         Task {
             defer { opening = false }
             do {
-                let localFiles = try await store.localReadingFiles(diagram).filter { $0.format != .svg }
-                let files: [CloudFile]
-                if !updating && !localFiles.isEmpty { files = localFiles }
-                else if offline { files = localFiles }
-                else { files = try await store.detail(diagram).files.filter { $0.format != .svg } }
-                guard let file = preferredCloudFile(localFiles) ?? preferredCloudFile(files) else { throw CloudError.unavailable }
+                let files = try await store.readingFiles(diagram, localOnly: offline)
+                guard let file = preferredCloudFile(files) else { throw CloudError.unavailable }
                 let keepSaved = updating && store.saved.contains { $0.diagram.id.lowercased() == diagram.id.lowercased() }
                 let doc = await store.open(diagram, file: file, persist: keepSaved)
                 if doc != nil { await store.reloadSaved() }

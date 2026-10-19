@@ -5,6 +5,45 @@ import LibraryOrganization
 @testable import PresentationViewer
 
 final class CloudLibraryTests: XCTestCase {
+    @MainActor
+    func testCachedCoverDoesNotHidePDFOrRemainingPNGPages() async throws {
+        let (files, root) = try temporaryStore(); defer { try? FileManager.default.removeItem(at: root) }
+        let api = CacheCountingAPI()
+        let store = CloudLibraryStore(api: api, files: files)
+        await store.refresh()
+        let diagram = try XCTUnwrap(store.items.first { $0.title.contains("RAG") })
+        let thumbnail = await store.thumbnail(diagram, offline: false)
+        XCTAssertNotNil(thumbnail)
+        let local = try await store.localReadingFiles(diagram)
+        XCTAssertEqual(local.count, 1)
+        XCTAssertEqual(local.first?.format, .png)
+        let counts = await api.counts()
+        let available = try await store.readingFiles(diagram)
+        XCTAssertEqual(preferredCloudFile(available)?.format, .pdf)
+        XCTAssertEqual(available.filter { $0.format == .png }.count, diagram.pageCount)
+        let afterMetadata = await api.counts()
+        XCTAssertEqual(counts, afterMetadata, "Use the cached full manifest without extra requests")
+        let pdf = try XCTUnwrap(preferredCloudFile(available))
+        let openedPDF = await store.open(diagram, file: pdf, persist: false)
+        XCTAssertNotNil(openedPDF)
+        XCTAssertEqual(PDFDocument(url: try XCTUnwrap(openedPDF).url)?.pageCount, diagram.pageCount)
+        let pages = available.filter { $0.format == .png }.sorted { $0.page < $1.page }
+        XCTAssertGreaterThan(pages.count, 1)
+        let second = await store.open(diagram, file: pages[1], persist: false)
+        XCTAssertNotNil(second)
+        XCTAssertNotEqual(second?.url, openedPDF?.url)
+        let localOnly = try await store.readingFiles(diagram, localOnly: true)
+        XCTAssertEqual(localOnly.filter { $0.format == .png }.count, 2)
+        XCTAssertTrue(localOnly.contains(pdf))
+        let offline = CloudLibraryStore(api: OfflineAPI(), files: files)
+        await offline.refresh()
+        XCTAssertTrue(offline.offline)
+        let offlineFiles = try await offline.readingFiles(diagram)
+        XCTAssertEqual(Set(offlineFiles.map(\.name)), Set(localOnly.map(\.name)))
+        let reopened = await offline.open(diagram, file: pages[1], persist: false)
+        XCTAssertNotNil(reopened)
+    }
+
     @MainActor func testProductionTabsShareOneQueueWithoutChangingManagement() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

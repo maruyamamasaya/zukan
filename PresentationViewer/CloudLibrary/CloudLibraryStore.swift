@@ -328,6 +328,11 @@ final class CloudLibraryStore: ObservableObject {
         if let detail = try await files.cachedDetail(diagram) { return try await files.localFiles(detail) }
         return saved.filter { $0.diagram.id.lowercased() == diagram.id.lowercased() && $0.diagram.version == diagram.version }.map(\.file)
     }
+    /// A cached cover is not the document's complete set of formats/pages.
+    func readingFiles(_ diagram: CloudDiagram, localOnly: Bool = false) async throws -> [CloudFile] {
+        if localOnly || offline { return try await localReadingFiles(diagram).filter { $0.format != .svg } }
+        return try await detail(diagram).files.filter { $0.format != .svg }
+    }
     func reloadSaved() async {
         do {
             lifecycle = try await files.lifecycleIndex()
