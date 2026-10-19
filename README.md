@@ -1,6 +1,8 @@
-# Presentation Viewer
+# zukan
 
-iPhone・iPad用の資料閲覧専用SwiftUIユニバーサルアプリ。iOS / iPadOS 17以降。外部ライブラリなし。既存フォルダ閲覧に加え、図解ライブラリのモック連携に対応。本番クラウド認証・接続は未設定。
+旧名はPresentation-Viewer。Mac上のプロジェクトフォルダは `Development/zukan`。Xcodeプロジェクト名・Scheme名は引き続き `PresentationViewer` を使用する。
+
+iPhone・iPad用の資料閲覧専用SwiftUIユニバーサルアプリ。iOS / iPadOS 17以降。外部ライブラリなし。既存フォルダ閲覧に加え、図解ライブラリ・本番OIDC認証・クラウド取得・オフライン閲覧に対応。現在の実装・検証状況は [CURRENT](CURRENT.md) を参照。
 
 ## 開く・実行する
 
@@ -139,3 +141,7 @@ Windowsで実行できるプロジェクトの構造チェックは `python tool
 フォルダ整理と複数選択：右下ライブラリ→本棚からフォルダ選択/作成、資料を選択→複数タップ→フォルダへ移動。未整理で分類解除。[操作・保存仕様](docs/library-folders.md)。
 
 整理情報の同期検証：ライブラリ→管理・設定→同期の検証。元設定を保持する独立コピー/loopback専用。[操作と範囲](docs/local-sync-ui.md)。
+
+## iPadの本棚（2026-10-19）
+
+広い画面では左にフォルダ・検索・分類、右に資料を表示します。狭い画面と大きな文字では引き出しを使います。iPadは現在の向きを保って開き、全画面閲覧でも回転を強制しません。Command-Fで検索、Command-Rで一覧更新。[配置と検証範囲](docs/ipad-layout.md)。過去の起動時横向き要求の記述はiPadについてこの仕様で更新します。

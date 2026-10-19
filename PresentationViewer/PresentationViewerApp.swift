@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Keep iPhone landscape-only; preserve the iPad launch preference.
+/// Keep iPhone landscape-only; let iPad retain its current orientation.
 private struct LibraryOrientationAnchor: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> LibraryOrientationController {
         LibraryOrientationController()
@@ -10,7 +10,6 @@ private struct LibraryOrientationAnchor: UIViewControllerRepresentable {
 }
 
 private final class LibraryOrientationController: UIViewController {
-    private var requestedInitialOrientation = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -35,8 +34,7 @@ private final class LibraryOrientationController: UIViewController {
     private func requestLandscape() {
         guard let scene = viewIfLoaded?.window?.windowScene else { return }
         let phone = UIDevice.current.userInterfaceIdiom == .phone
-        guard phone || !requestedInitialOrientation else { return }
-        requestedInitialOrientation = true
+        guard phone else { return }
         if phone {
             scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
             setNeedsUpdateOfSupportedInterfaceOrientations()

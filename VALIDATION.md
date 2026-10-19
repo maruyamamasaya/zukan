@@ -107,3 +107,5 @@ PPTXは引き続きQuick Look、SVGはWebKitの標準表示で、この変更で
 2026-10-10：中央開始ボタン。40 XCTest合格、Simulatorプレゼン開始/終了と横長一枚図全画面を操作・目視確認。[記録](docs/reader-start-button.md)。
 
 2026-10-10 図解のまとめ：44 XCTest合格、Simulatorの作成・並べ替え・再起動保持・全画面前後移動を確認。署名build/codesign合格、Vespera更新/起動成功。実機対話操作は未検証。[記録](docs/diagram-collections.md)。
+
+2026-10-19：[iPad画面改善](docs/ipad-layout.md)。iPadOS26.5通常署名67 XCTest・generic iOS build合格。モックで縦横・整理・PNG閲覧・大文字の手動確認。実ウィンドウ縮小／実機は未確認。旧構造検査の共有パッケージ拒否は同記録参照。

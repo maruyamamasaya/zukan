@@ -16,6 +16,7 @@ struct DocumentViewer: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var readerPanelVisible = false
     private var phoneUI: Bool { UIDevice.current.userInterfaceIdiom == .phone }
+    private var compactUI: Bool { phoneUI || horizontalSizeClass == .compact || dynamicTypeSize.isAccessibilitySize }
     @State private var slideRailVisible = true
     @State private var toolbarVisible = true
     @State private var thumbnailPreference: Bool?
@@ -112,7 +113,7 @@ struct DocumentViewer: View {
                     }
                 }
             }
-            .toolbar(!phoneUI && toolbarVisible && !presenting ? .visible : .hidden, for: .navigationBar)
+            .toolbar(!compactUI && toolbarVisible && !presenting ? .visible : .hidden, for: .navigationBar)
             .ignoresSafeArea(presenting && displayIntent == .illustration ? .all : [], edges: .all)
             .overlay {
                 if !presenting && hasPages {
@@ -129,7 +130,7 @@ struct DocumentViewer: View {
                 }
             }
             .overlay(alignment: .trailing) {
-                if phoneUI && !presenting {
+                if compactUI && !presenting {
                     GeometryReader { geometry in
                         ZStack(alignment: .trailing) {
                             if readerPanelVisible {
@@ -173,7 +174,7 @@ struct DocumentViewer: View {
                 }
             }
             .overlay(alignment: .topLeading) {
-                if phoneUI && !presenting {
+                if compactUI && !presenting {
                     Button { dismiss() } label: {
                         Label("閉じる", systemImage: "xmark")
                             .font(.system(size: 14, weight: .medium))
@@ -184,7 +185,7 @@ struct DocumentViewer: View {
                 }
             }
             .safeAreaInset(edge: .top, spacing: 0) {
-                if !phoneUI && !presenting && !toolbarVisible {
+                if !compactUI && !presenting && !toolbarVisible {
                     HStack {
                         Button("閉じる") { dismiss() }.keyboardShortcut(.cancelAction)
                         Button { toolbarVisible = true } label: { Label("操作を表示", systemImage: "ellipsis") }
@@ -203,7 +204,10 @@ struct DocumentViewer: View {
         } message: {
             Text(orientation.errorMessage ?? "")
         }
-        .onDisappear { external.end(pdfSession); orientation.request(.landscape, allowingRotation: true) }
+        .onDisappear {
+            external.end(pdfSession)
+            if phoneUI { orientation.request(.landscape, allowingRotation: true) }
+        }
     }
 
     @ViewBuilder private var documentCanvas: some View {
@@ -308,7 +312,7 @@ struct DocumentViewer: View {
         } else {
             contentSize = UIImage(contentsOfFile: document.url.path)?.size
         }
-        orientation.request(displayIntent.orientation(for: contentSize))
+        if phoneUI { orientation.request(displayIntent.orientation(for: contentSize)) }
         if document.format == .pdf {
             pdfSession.isPresenting = true
             external.begin(pdfSession)
@@ -320,7 +324,7 @@ struct DocumentViewer: View {
         pdfSession.isPresenting = false
         imagePresenting = false
         toolbarVisible = true
-        orientation.request(.landscape, allowingRotation: true)
+        if phoneUI { orientation.request(.landscape, allowingRotation: true) }
     }
 }
 
