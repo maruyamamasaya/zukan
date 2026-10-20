@@ -17,7 +17,7 @@ actor CloudFileStore {
     private let saved: URL
     private let cache: URL
     private static let cacheLock = NSLock()
-    static let maximumCacheBytes: Int64 = 5_000_000_000
+    static let maximumCacheBytes: Int64 = LibraryArtifactPolicy.maximumCacheBytes
     private let cacheLimit: Int64
     private let cacheRoot: URL
     init(saved: URL, cache: URL, cacheLimit: Int64 = CloudFileStore.maximumCacheBytes, cacheRoot: URL? = nil) throws {
@@ -28,7 +28,15 @@ actor CloudFileStore {
     static func applicationStore(namespace: String? = nil) throws -> CloudFileStore {
         let fm = FileManager.default
         let saved = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("DiagramLibrary")
-        let cache = try fm.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("DiagramLibrary")
+        let legacy = try fm.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("DiagramLibrary")
+        var cache = saved.deletingLastPathComponent().appendingPathComponent("DiagramLibraryCache")
+        // Reading copies must survive OS cache purges. Keep them out of device backups.
+        try Self.cacheLock.withLock {
+            if !fm.fileExists(atPath: cache.path), fm.fileExists(atPath: legacy.path) { try fm.moveItem(at: legacy, to: cache) }
+            try fm.createDirectory(at: cache, withIntermediateDirectories: true)
+            var values = URLResourceValues(); values.isExcludedFromBackup = true
+            try cache.setResourceValues(values)
+        }
         if let namespace {
             guard namespace.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else { throw CloudError.invalidResponse }
             return try CloudFileStore(saved: saved.appendingPathComponent(namespace), cache: cache.appendingPathComponent(namespace), cacheRoot: cache)
@@ -153,11 +161,14 @@ actor CloudFileStore {
         state.scopeLegacyFolders { kinds[$0.lowercased()] == true ? .illustration : .presentation }
         return state
     }
-    func createFolder(name: String, parentID: UUID? = nil, shelf: LibraryShelf? = nil) throws -> OrganizationState<CloudDiagram> {
+    func createFolder(name: String, parentID: UUID? = nil, shelf: LibraryShelf? = nil, documentIDs: Set<String> = []) throws -> OrganizationState<CloudDiagram> {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         var value = try (shelf == nil ? testLibrarySyncSource() : folderOrganization())
         guard !name.isEmpty, name.count <= 120, parentID == nil || value.folders.contains(where: { $0.id == parentID }) else { throw CloudError.invalidResponse }
-        if let shelf { value.createFolder(name: name, shelf: shelf, parentID: parentID) }
+        if let shelf {
+            let id = value.createFolder(name: name, shelf: shelf, parentID: parentID)
+            if !documentIDs.isEmpty { value.moveDocuments(documentIDs,to:id,memberID:{$0.id}) }
+        }
         else { value.folders.append(OrganizationFolder(name: name, parentID: parentID)) }
         if shelf != nil { try applyTestLibrarySync(value) } else { try writeOrganization(value) }; return value
     }
@@ -339,10 +350,23 @@ actor CloudFileStore {
                 guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]), values.isRegularFile == true else { return nil }
                 return (url, Int64(values.fileSize ?? 0), values.contentModificationDate ?? .distantPast)
             }.sorted { $0.2 < $1.2 }
-        var total = entries.reduce(Int64(bytes)) { $0 + $1.1 }
-        for (url, size, _) in entries where total > cacheLimit {
-            try fm.removeItem(at: url); total -= size
+        // Evict a document version as a unit so an offline PDF never loses its detail metadata.
+        func groupKey(_ url: URL) -> String {
+            let name = url.lastPathComponent
+            let pattern = "^(?:detail-)?([a-fA-F0-9-]{36}-[0-9]+)(?:-|\\.)"
+            guard let range = name.range(of: pattern, options: .regularExpression) else { return url.path }
+            var key = String(name[range]); if key.hasPrefix("detail-") { key.removeFirst(7) }; key.removeLast()
+            return url.deletingLastPathComponent().path + "/" + key.lowercased()
         }
+        let destinationGroup = groupKey(destination)
+        let groups = Dictionary(grouping: entries, by: { groupKey($0.0) }).sorted {
+            ($0.value.map { $0.2 }.max() ?? .distantPast) < ($1.value.map { $0.2 }.max() ?? .distantPast)
+        }
+        var total = entries.reduce(Int64(bytes)) { $0 + $1.1 }
+        for (key, group) in groups where total > cacheLimit && key != destinationGroup {
+            for (url, size, _) in group { try fm.removeItem(at: url); total -= size }
+        }
+        guard total <= cacheLimit else { throw CloudError.unavailable }
     }
     /// Recover browsable copies after restart, without trusting an unverified cache file.
     func cachedDiagrams() throws -> [CloudDiagram] {

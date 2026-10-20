@@ -5,6 +5,103 @@ import LibraryOrganization
 @testable import PresentationViewer
 
 final class CloudLibraryTests: XCTestCase {
+    func testHTTPSReadRefreshesOnceAndRecoversFromThrottle() async throws {
+        let token = RetryTestToken()
+        var calls = 0
+        OIDCTestProtocol.respond = { request in
+            calls += 1
+            XCTAssertEqual(request.value(forHTTPHeaderField:"Authorization"),calls == 1 ? "Bearer stale" : "Bearer fresh")
+            OIDCTestProtocol.statusCode = calls == 1 ? 401 : calls == 2 ? 429 : 200
+            return Data("{\"items\":[],\"nextCursor\":null}".utf8)
+        }
+        defer { OIDCTestProtocol.respond = nil; OIDCTestProtocol.statusCode = 200 }
+        let config = URLSessionConfiguration.ephemeral;config.protocolClasses=[OIDCTestProtocol.self]
+        let api = try HTTPSCloudAPI(baseURL:URL(string:"https://retry.example")!,allowedArtifactHosts:["artifacts.example"],tokens:token,sessionConfiguration:config)
+        let list = try await api.list(query:"",cursor:nil)
+        XCTAssertTrue(list.items.isEmpty);XCTAssertEqual(calls,3)
+        let refreshes = await token.refreshes;XCTAssertEqual(refreshes,1)
+    }
+    @MainActor func testLiveProductionReadAndOfflineReopen() async throws {
+        guard ProcessInfo.processInfo.environment["ZUKAN_LIVE_READ_VERIFY"] == "1" else { throw XCTSkip("Explicit real-device owner-session verification only") }
+        let config = try CloudConnection.bundled()
+        guard config.api.absoluteString == "https://2zpp6z8zvc.execute-api.ap-northeast-1.amazonaws.com" else { throw CloudError.invalidResponse }
+        let auth = try CloudOIDC(config:config)
+        _ = try await auth.accessToken()
+        let api = try HTTPSCloudAPI(baseURL:config.api,allowedArtifactHosts:Set(config.artifactHosts),tokens:auth)
+        let (files,root) = try temporaryStore(); defer { try? FileManager.default.removeItem(at:root) }
+        let store = CloudLibraryStore(api:api,files:files)
+        for (id,version,pages) in [("e64e2471-56b8-4583-bc89-45e549053c22",3,22),("3d44978d-f8c0-4261-860b-bd691dd9b667",1,1)] {
+            let detail = try await api.detail(id:id,version:version);try detail.validate()
+            try await files.cacheDetail(detail)
+            let file = try XCTUnwrap(detail.files.first { $0.format == .pdf })
+            let opened = await store.open(detail.diagram,file:file,persist:false)
+            let url = try XCTUnwrap(opened,store.errorMessage ?? "Real download failed").url
+            let pdf = try XCTUnwrap(PDFDocument(url:url));XCTAssertEqual(pdf.pageCount,pages)
+            let page = try XCTUnwrap(pdf.page(at:0))
+            let rendered = page.thumbnail(of:CGSize(width:640,height:360),for:.mediaBox)
+            XCTAssertGreaterThan(rendered.size.width,0)
+            let image = XCTAttachment(image:rendered);image.name="Live PDF page1 - " + id;image.lifetime = .keepAlways;add(image)
+            let restarted = CloudLibraryStore(api:OfflineAPI(),files:try CloudFileStore(saved:root.appendingPathComponent("saved"),cache:root.appendingPathComponent("cache")))
+            let reading = try await restarted.readingFiles(detail.diagram)
+            XCTAssertTrue(reading.contains(file))
+            let offline = await restarted.open(detail.diagram,file:file,persist:false)
+            XCTAssertEqual(PDFDocument(url:try XCTUnwrap(offline).url)?.pageCount,pages)
+            let report = XCTAttachment(string:"Real owner-authenticated API/S3 SHA256-verified PDF and offline reopen passed: " + id + " v" + String(version) + " pages=" + String(pages) + " cacheLimit=" + String(CloudFileStore.maximumCacheBytes));report.lifetime = .keepAlways;add(report)
+        }
+    }
+    @MainActor func testClearingLocalCopiesInvalidatesDecodedCover() async throws {
+        let (files, root) = try temporaryStore(); defer { try? FileManager.default.removeItem(at: root) }
+        let store = CloudLibraryStore(api: MockCloudAPI(), files: files)
+        await store.refresh()
+        let diagram = try XCTUnwrap(store.items.first { $0.title.contains("RAG") })
+        let first = await store.thumbnail(diagram, offline: false)
+        XCTAssertNotNil(first)
+        await store.clearLocalDocuments()
+        let offline = await store.thumbnail(diagram, offline: true)
+        XCTAssertNil(offline, "Deleted local copies must not survive in the cover cache")
+        let reloaded = await store.thumbnail(diagram, offline: false)
+        XCTAssertNotNil(reloaded)
+        XCTAssertFalse(first === reloaded)
+    }
+
+    @MainActor func testCoverWorkerDownsamplesLargeImageAndPDF() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let size = CGSize(width: 2400, height: 1200)
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let original = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.red.setFill(); context.fill(CGRect(origin: .zero, size: size))
+        }
+        let png = root.appendingPathComponent("large.png")
+        try XCTUnwrap(original.pngData()).write(to: png)
+        let pdf = root.appendingPathComponent("large.pdf")
+        try UIGraphicsPDFRenderer(bounds: CGRect(origin: .zero, size: size)).writePDF(to: pdf) { context in
+            context.beginPage(); original.draw(in: CGRect(origin: .zero, size: size))
+        }
+        for url in [png, pdf] {
+            let rendered = await CloudThumbnailRenderer.shared.image(at: url)
+            let cg = try XCTUnwrap(rendered?.cgImage)
+            XCTAssertLessThanOrEqual(max(cg.width, cg.height), CloudThumbnailRenderer.maximumPixelSize)
+            XCTAssertEqual(Double(cg.width) / Double(cg.height), 2, accuracy: 0.02)
+        }
+        let missing = await CloudThumbnailRenderer.shared.image(at: root.appendingPathComponent("missing.png"))
+        XCTAssertNil(missing)
+    }
+
+    @MainActor func testCreatingClassificationFolderMovesSelectionInOneSave() async throws {
+        let (files,root) = try temporaryStore();defer { try? FileManager.default.removeItem(at:root) }
+        let store = CloudLibraryStore(api:MockCloudAPI(),files:files);await store.refresh()
+        let diagram = try XCTUnwrap(store.items.first { CloudLibraryKind.illustrations.contains($0) })
+        let created = await store.createFolder("人物",shelf:.illustration,documentIDs:[diagram.id.lowercased()]);XCTAssertTrue(created)
+        let folder = try XCTUnwrap(store.integratedOrganization.folders(in:.illustration).first { $0.name == "人物" })
+        XCTAssertEqual(store.organization.assignments[diagram.id.lowercased()],folder.id)
+        let restarted = CloudLibraryStore(api:OfflineAPI(),files:files);await restarted.reloadSaved()
+        XCTAssertEqual(restarted.organization.assignments[diagram.id.lowercased()],folder.id)
+        XCTAssertTrue(restarted.integratedOrganization.isFiled(diagram.id.lowercased(),memberID:{$0.id}))
+        let unfiled = await restarted.moveDocuments([diagram.id.lowercased()],to:LibraryShelf.illustration.rootID,scoped:true);XCTAssertTrue(unfiled)
+        XCTAssertFalse(restarted.integratedOrganization.isFiled(diagram.id.lowercased(),memberID:{$0.id}))
+    }
     @MainActor func testUnifiedFoldersPreserveLegacyMembershipAndSeparateKinds() async throws {
         let (files, root) = try temporaryStore(); defer { try? FileManager.default.removeItem(at: root) }
         let store = CloudLibraryStore(api: MockCloudAPI(), files: files)
@@ -38,6 +135,8 @@ final class CloudLibraryTests: XCTestCase {
         let diagram = try XCTUnwrap(store.items.first { $0.title.contains("RAG") })
         let thumbnail = await store.thumbnail(diagram, offline: false)
         XCTAssertNotNil(thumbnail)
+        let repeated = await store.thumbnail(diagram, offline: false)
+        XCTAssertTrue(thumbnail === repeated, "Reuse the decoded cover when a card reappears")
         let local = try await store.localReadingFiles(diagram)
         XCTAssertEqual(local.count, 1)
         XCTAssertEqual(local.first?.format, .png)
@@ -224,7 +323,7 @@ final class CloudLibraryTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: saved.path))
         let catalog = try await files.cachedCatalog()
         XCTAssertEqual(catalog, items)
-        XCTAssertEqual(CloudFileStore.maximumCacheBytes, 5_000_000_000)
+        XCTAssertEqual(CloudFileStore.maximumCacheBytes, 10_000_000_000)
     }
 
     @MainActor
@@ -712,6 +811,17 @@ final class CloudLibraryTests: XCTestCase {
         XCTAssertEqual(store.saved.count, 1)
         await store.clearCache(); let reopened = await store.openSaved(store.saved[0]); XCTAssertNotNil(reopened)
     }
+    @MainActor func testTransientArtifactFailureRetriesAndThenReusesCache() async throws {
+        let mock = MockCloudAPI(), item = try await mock.list(query:"RAG",cursor:nil).items[0]
+        let detail = try await mock.detail(id:item.id,version:item.version)
+        let file = try XCTUnwrap(preferredCloudFile(detail.files))
+        let (files,root) = try temporaryStore();defer { try? FileManager.default.removeItem(at:root) }
+        let api = ExpiringAPI(mock:mock,transient:true)
+        let store = CloudLibraryStore(api:api,files:files)
+        let opened = await store.open(item,file:file,persist:false);XCTAssertNotNil(opened)
+        let again = await store.open(item,file:file,persist:false);XCTAssertNotNil(again)
+        let attempts = await api.attempts;XCTAssertEqual(attempts,2)
+    }
     @MainActor
     func testOIDCRefreshValidatesIdentityAndLogoutClearsKeychain() async throws {
         let config = CloudConnection(issuer: URL(string: "https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_Test")!, domain: URL(string: "https://test.auth.ap-northeast-1.amazoncognito.com")!, clientID: UUID().uuidString, api: URL(string: "https://api.example")!, artifactHosts: ["bucket.s3.ap-northeast-1.amazonaws.com"], redirect: "presentationviewer://oauth/callback")
@@ -832,6 +942,16 @@ final class CloudLibraryTests: XCTestCase {
         let decoded = try JSONDecoder().decode(CloudDetail.self, from: JSONSerialization.data(withJSONObject: json))
         try decoded.validate(); XCTAssertEqual(decoded.files.count, detail.files.count)
     }
+    func testArtHistoryPathsAndApprovedLargeFiles() throws {
+        let d = CloudDiagram(id:"e64e2471-56b8-4583-bc89-45e549053c22",title:"美術史",type:"presentation",version:3,formats:[.png,.pdf,.pptx],pageCount:22,tags:[])
+        let png = CloudFile(name:"slides/slide-022/slide.png",format:.png,sizeBytes:12,sha256:String(repeating:"a",count:64),contentType:CloudFormat.png.mime)
+        XCTAssertEqual(png.page,22); XCTAssertNoThrow(try png.validate(for:d))
+        let pdf = CloudFile(name:"document.pdf",format:.pdf,sizeBytes:43829069,sha256:"8f920050c622a7c7e263f8b922020d4dfd8385b818949927d0dfeca265093c1e",contentType:CloudFormat.pdf.mime)
+        XCTAssertNoThrow(try pdf.validate(for:d))
+        let other = CloudDiagram(id:d.id,title:d.title,type:d.type,version:4,formats:d.formats,pageCount:d.pageCount,tags:[])
+        XCTAssertThrowsError(try pdf.validate(for:other))
+        XCTAssertThrowsError(try CloudFile(name:"slides/slide-../slide.png",format:.png,sizeBytes:12,sha256:png.sha256,contentType:png.contentType).validate(for:d))
+    }
     func testApprovedLargePresentationIsScopedToExactVersionAndBytes() throws {
         let diagram = CloudDiagram(id: CloudArtifactSizePolicy.diagramID, title: "2040", type: "presentation", version: 1, formats: [.png, .pdf, .pptx], pageCount: 40, tags: [])
         let pdf = CloudFile(name: "document.pdf", format: .pdf, sizeBytes: 29_640_691, sha256: "eb08beebf657a1582423e48f3602207169828b5ec906c5ce9c9a3a18acbf620a", contentType: CloudFormat.pdf.mime)
@@ -901,26 +1021,37 @@ private struct OfflineAPI: CloudLibraryAPI {
 private actor ExpiringAPI: CloudLibraryAPI {
     let mock: MockCloudAPI
     private(set) var attempts = 0
-    init(mock: MockCloudAPI) { self.mock = mock }
+    let transient: Bool
+    init(mock: MockCloudAPI, transient:Bool = false) { self.mock = mock;self.transient = transient }
     func list(query: String, cursor: String?) async throws -> CloudList { try await mock.list(query: query, cursor: cursor) }
     func detail(id: String, version: Int) async throws -> CloudDetail { try await mock.detail(id: id, version: version) }
     func access(diagram: CloudDiagram, file: CloudFile) async throws -> CloudGrant {
         attempts += 1; return try await mock.access(diagram: diagram, file: file)
     }
     func download(_ grant: CloudGrant) async throws -> Data {
-        if attempts == 1 { throw CloudError.expiredURL }
+        if attempts == 1 {
+            if transient { throw SyncRetryFailure(retryAfter:nil) }
+            throw CloudError.expiredURL
+        }
         return try await mock.download(grant)
     }
 }
 
+private actor RetryTestToken: CloudAccessTokenProvider {
+    var refreshes = 0
+    var current = "stale"
+    func accessToken() async throws -> String { current }
+    func accessToken(forceRefresh:Bool) async throws -> String { if forceRefresh { refreshes += 1;current = "fresh" };return current }
+}
 private final class OIDCTestProtocol: URLProtocol {
+    static var statusCode = 200
     static var respond: ((URLRequest) throws -> Data)?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         do {
             let data = try Self.respond?(request) ?? Data()
-            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: Self.statusCode, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
             client?.urlProtocolDidFinishLoading(self)
         } catch { client?.urlProtocol(self, didFailWithError: error) }

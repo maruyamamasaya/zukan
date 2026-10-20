@@ -53,26 +53,23 @@ struct CloudDiagram: Codable, Identifiable, Sendable, Equatable {
               !formats.isEmpty, Set(formats).count == formats.count else { throw CloudError.invalidResponse }
     }
 }
-struct CloudList: Codable, Sendable { let items: [CloudDiagram]; let nextCursor: String? }
+struct CloudCatalogWarning: Codable, Sendable { let id: String; let version: Int; let code: String }
+struct CloudList: Codable, Sendable { let items: [CloudDiagram]; let nextCursor: String?; var warnings: [CloudCatalogWarning]? = nil }
 // Human-approved exception for this immutable presentation only. Other files retain 20 MB.
 enum CloudArtifactSizePolicy {
     static let diagramID = "4f2af5d0-86c9-4709-9dad-9f6a67e5ac10"
     static func approvedLargeFile(name: String, sizeBytes: Int, sha256: String, contentType: String) -> Bool {
-        switch name {
-        case "document.pdf":
-            return sizeBytes == 29_640_691 && contentType == CloudFormat.pdf.mime &&
-                sha256 == "eb08beebf657a1582423e48f3602207169828b5ec906c5ce9c9a3a18acbf620a"
-        case "presentation.pptx":
-            return sizeBytes == 20_067_274 && contentType == CloudFormat.pptx.mime &&
-                sha256 == "80e86b33ad702a9642f615e475885a48847288a365469b36778d689211ed870b"
-        default: return false
-        }
+        LibraryArtifactPolicy.allows(name: name, size: sizeBytes, hash: sha256) &&
+            ((name == "document.pdf" && contentType == CloudFormat.pdf.mime) ||
+             (name == "presentation.pptx" && contentType == CloudFormat.pptx.mime))
     }
     static func allows(file: CloudFile, diagram: CloudDiagram) -> Bool {
         guard file.sizeBytes > 0 else { return false }
         if file.sizeBytes < 20_000_000 { return true }
-        return diagram.id.lowercased() == diagramID && diagram.version == 1 &&
-            diagram.type == "presentation" && diagram.pageCount == 40 &&
+        return diagram.type == "presentation" &&
+            ((diagram.id.lowercased() == diagramID && diagram.pageCount == 40) ||
+             (diagram.id.lowercased() == "e64e2471-56b8-4583-bc89-45e549053c22" && diagram.pageCount == 22)) && LibraryArtifactPolicy.allows(name: file.name,
+            size: file.sizeBytes, hash: file.sha256, id: diagram.id, version: diagram.version) &&
             approvedLargeFile(name: file.name, sizeBytes: file.sizeBytes, sha256: file.sha256, contentType: file.contentType)
     }
     static func allows(grant: CloudGrant) -> Bool {
@@ -90,14 +87,15 @@ struct CloudFile: Codable, Sendable, Equatable {
     let contentType: String
     var page: Int {
         let parts = name.split(separator: "/")
-        return parts.count == 3 && parts[0] == "slides" ? Int(parts[1]) ?? 0 : 1
+        return parts.count == 3 && parts[0] == "slides" ? Int(parts[1].replacingOccurrences(of: "slide-", with: "")) ?? 0 : 1
     }
     func validate(for diagram: CloudDiagram) throws {
         try diagram.validate()
         let expected = diagram.type == "presentation"
             ? (format == .png ? String(format: "slides/%03d/slide.png", page) : format == .pdf ? "document.pdf" : format == .pptx ? "presentation.pptx" : "")
             : "diagram.\(format.rawValue)"
-        guard name == expected, !expected.isEmpty, diagram.formats.contains(format),
+        let alternate = format == .png && diagram.type == "presentation" ? String(format: "slides/slide-%03d/slide.png", page) : expected
+        guard (name == expected || name == alternate), !expected.isEmpty, diagram.formats.contains(format),
               page >= 1, page <= diagram.pageCount, contentType == format.mime,
               CloudArtifactSizePolicy.allows(file: self, diagram: diagram),
               sha256.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else { throw CloudError.invalidResponse }

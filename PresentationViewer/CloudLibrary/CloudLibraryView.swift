@@ -26,6 +26,8 @@ struct CloudLibraryView: View {
     @State private var selectedDocuments = Set<String>()
     @State private var folderName = ""
     @State private var showFolderDialog = false
+    @State private var folderCreationIDs = Set<String>()
+    @State private var folderCreationShelf = LibraryShelf.presentation
     @State private var renamingFolder: UUID?
     @State private var moving = false
     @State private var syncLab: SyncLabSession?
@@ -86,7 +88,15 @@ struct CloudLibraryView: View {
         return phoneUI && kind == .illustrations ? .illustration : .presentation
     }
     private var folders: [OrganizationFolder] {
-        phoneUI ? store.integratedOrganization.folders(in: libraryShelf) : store.integratedOrganization.orderedFolders
+        phoneUI ? store.integratedOrganization.folders(in: libraryShelf) : store.integratedOrganization.orderedFolders.filter { !LibraryShelf.isRoot($0.id) }
+    }
+    private var selectedMoveShelf: LibraryShelf? {
+        let kinds = Set(diagrams.filter { selectedDocuments.contains($0.id.lowercased()) }.map { CloudLibraryKind.illustrations.contains($0) ? LibraryShelf.illustration.rawValue : LibraryShelf.presentation.rawValue })
+        return kinds.count == 1 ? kinds.first.flatMap(LibraryShelf.init(rawValue:)) : nil
+    }
+    private var destinationFolders: [OrganizationFolder] {
+        guard let shelf = selectedMoveShelf else { return [] }
+        return store.integratedOrganization.folders(in:shelf)
     }
     private var looseDiagrams: [CloudDiagram] {
         guard let id = UUID(uuidString: selectedShelf), let collection = store.collections.first(where: { $0.id == id }) else { return diagrams }
@@ -155,11 +165,17 @@ struct CloudLibraryView: View {
             TextField("フォルダ名", text: $folderName)
             Button("保存") { Task {
                 if let id = renamingFolder { _ = await store.renameFolder(id, name: folderName) }
-                else { _ = await store.createFolder(folderName, parentID: UUID(uuidString: selectedShelf), shelf: libraryShelf) }
-                folderName = ""
+                else {
+                    let targetShelf = folderCreationIDs.isEmpty ? libraryShelf : folderCreationShelf
+                    let parent = UUID(uuidString:selectedShelf).flatMap { store.integratedOrganization.descendants(of:targetShelf.rootID).contains($0) ? $0 : nil }
+                    if await store.createFolder(folderName,parentID:parent,shelf:targetShelf,documentIDs:folderCreationIDs), !folderCreationIDs.isEmpty {
+                        selectedDocuments.removeAll();selecting = false
+                    }
+                }
+                folderName = "";folderCreationIDs = []
             } }
-            Button("キャンセル", role: .cancel) {}
-        } message: { Text("フォルダ選択中なら、その中に作成します。") }
+            Button("キャンセル", role: .cancel) { folderCreationIDs = [] }
+        } message: { Text(folderCreationIDs.isEmpty ? "選択中の種類の中に分類フォルダを作成します。" : "選択した資料を新しいフォルダへ移動します。") }
         .confirmationDialog("端末の資料をすべて削除しますか？", isPresented: $showClearDocuments, titleVisibility: .visible) {
             Button("端末の資料を削除", role: .destructive) { Task { await store.clearLocalDocuments() } }
         } message: {
@@ -258,8 +274,12 @@ struct CloudLibraryView: View {
                                 }.disabled(selectedDocuments.isEmpty || store.busy || !store.lifecycleEnabled)
                             } else {
                                 Menu("フォルダへ移動") {
+                                    Button("新しいフォルダへ移動…") {
+                                        if let shelf = selectedMoveShelf { folderCreationShelf = shelf;folderCreationIDs = selectedDocuments;renamingFolder = nil;folderName = "";showFolderDialog = true }
+                                    }.disabled(selectedMoveShelf == nil)
                                     Button("未整理") { moveSelection(to: nil) }
-                                    ForEach(folders) { folder in Button(store.folderPath(folder.id)) { moveSelection(to: folder.id) } }
+                                    ForEach(destinationFolders) { folder in Button(store.folderPath(folder.id)) { moveSelection(to: folder.id) } }
+                                    if selectedMoveShelf == nil { Text("プレゼンと図解は種類ごとに選択してください") }
                                 }.disabled(selectedDocuments.isEmpty || moving)
                                 Button("ゴミ箱へ移動", role: .destructive) {
                                     trashCandidates = diagrams.filter { selectedDocuments.contains($0.id.lowercased()) }; confirmTrash = true
@@ -353,6 +373,11 @@ struct CloudLibraryView: View {
                 .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(selectedShelf == value ? theme.accent.opacity(0.35) : .clear))
         }.buttonStyle(.plain).accessibilityAddTraits(selectedShelf == value ? .isSelected : [])
     }
+    private func folderRow(_ folder:OrganizationFolder) -> some View {
+        shelfRow(folder.name,symbol:"folder",value:folder.id.uuidString)
+            .padding(.leading,CGFloat(max(0,store.folderPath(folder.id).components(separatedBy:" / ").count-1))*12)
+            .accessibilityLabel(store.folderPath(folder.id))
+    }
     private var phoneFolderRail: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 2) {
@@ -362,16 +387,19 @@ struct CloudLibraryView: View {
                 }
                 shelfRow("すべて", symbol: "books.vertical", value: "all")
                 shelfRow("未整理", symbol: "tray", value: "unfiled")
-                Text("フォルダ").font(.caption).foregroundStyle(.secondary).padding(.top, 14).padding(.horizontal, 8)
-                ForEach(folders) { folder in
-                    shelfRow(folder.name, symbol: "folder", value: folder.id.uuidString)
-                        .padding(.leading, CGFloat(max(0, store.folderPath(folder.id).components(separatedBy: " / ").count - 1)) * 12)
-                        .accessibilityLabel(store.folderPath(folder.id))
+                Text(phoneUI ? "フォルダ" : "種類と分類フォルダ").font(.caption).foregroundStyle(.secondary).padding(.top, 14).padding(.horizontal, 8)
+                if phoneUI {
+                    ForEach(folders) { folder in folderRow(folder) }
+                } else {
+                    ForEach([LibraryShelf.presentation, .illustration],id: \.rawValue) { shelf in
+                        shelfRow(shelf.title + "（すべて）",symbol:"books.vertical",value:shelf.rootID.uuidString)
+                        ForEach(store.integratedOrganization.folders(in:shelf)) { folder in folderRow(folder).padding(.leading,12) }
+                    }
                 }
                 Divider().padding(.vertical, 8)
                 shelfRow("ゴミ箱", symbol: "trash", value: "trash")
                 Menu {
-                    Button("フォルダを作成", systemImage: "folder.badge.plus") { renamingFolder = nil; folderName = ""; showFolderDialog = true }
+                    Button("フォルダを作成", systemImage: "folder.badge.plus") { folderCreationIDs = [];renamingFolder = nil; folderName = ""; showFolderDialog = true }
                     if let id = UUID(uuidString: selectedShelf), !LibraryShelf.isRoot(id) {
                         Button("名前を変更", systemImage: "pencil") { renamingFolder = id; folderName = folders.first(where: { $0.id == id })?.name ?? ""; showFolderDialog = true }
                         Button("フォルダを解除", systemImage: "folder.badge.minus") {
@@ -438,7 +466,10 @@ struct CloudLibraryView: View {
     private func matchesFolder(_ diagram: CloudDiagram) -> Bool {
         let organization = store.integratedOrganization
         if selectedShelf == "unfiled" { return !organization.isFiled(diagram.id.lowercased(), memberID: { $0.id }) }
-        if let id = UUID(uuidString: selectedShelf) { return organization.containsDocument(diagram.id.lowercased(), in: id, memberID: { $0.id }) }
+        if let id = UUID(uuidString: selectedShelf) {
+            if LibraryShelf.isRoot(id) { return (id == LibraryShelf.illustration.rootID) == CloudLibraryKind.illustrations.contains(diagram) }
+            return organization.containsDocument(diagram.id.lowercased(), in: id, memberID: { $0.id })
+        }
         return true
     }
     private func moveSelection(to folderID: UUID?) {
@@ -573,7 +604,9 @@ private struct CloudCover: View {
             }
         }
         .task(id: "\(diagram.selfKey)-\(offline)-\(store.saved.filter { $0.diagram.id == diagram.id && $0.diagram.version == diagram.version }.count)") {
-            if !suppressThumbnail { image = await store.thumbnail(diagram, offline: offline) }
+            guard !suppressThumbnail else { image = nil; return }
+            let loaded = await store.thumbnail(diagram, offline: offline)
+            if !Task.isCancelled { image = loaded }
         }
     }
 }

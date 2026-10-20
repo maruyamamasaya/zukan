@@ -1,3 +1,7 @@
+2026-10-20：本番取得障害を修復。APIの読取仕様と保存仕様の一致確認・不正版隔離、両クライアントの美術史対応、10GBの永続閲覧キャッシュ、認証更新/一時失敗再試行を実装。Mira/Vesperaで本人ログインによる実PDF取得・PDFKit描画・通信なし再表示を確認。[記録](sessions/2026-10-20-fetch-stability.md)。
+
+2026-10-20：iPhone/iPadの一覧表紙を縮小・バックグラウンド生成・メモリ再利用へ変更。iPhone/iPad Simulator各77 XCTest合格。2026-10-20 01:11 JSTまでにMira/VesperaへRelease署名版を更新・起動済み。実機スクロール速度比較は未実施。[仕様](docs/cloud-library.md#一覧表紙の軽量化2026-10-20)、[検証記録](sessions/2026-10-20-library-thumbnails.md)。
+
 2026-10-19：既存容量画面へ「今月のAWS費用」を追加するローカル実装。図鑑配賦分/共通未配賦・内訳・取得日時・7日共有枠を表示。本人承認後、サーバーは無効flagで配備・Project配賦タグActive。CE反映待ちのため金額取得/実機更新は保留。実機確認対象はMiraだけ。本人承認で8時間おき最大4回の反映確認と成功後の更新を設定済み。[仕様](docs/monthly-billing.md)。
 
 2026-10-19：保存費画面を「S3保存容量と月額費用」に変更、容量/料金の手入力を廃止。全版実容量endpointへ接続。本人承認後、本番API/IAM適用・CLI容量照合が成功。Vespera/Miraへ更新インストール・起動済み。実機画面操作は未確認。[仕様](docs/s3-storage-capacity.md)。

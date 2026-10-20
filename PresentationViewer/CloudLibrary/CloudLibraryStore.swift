@@ -2,6 +2,7 @@ import SwiftUI
 import LibraryOrganization
 import LibraryOrganizationUI
 import PDFKit
+import ImageIO
 
 @MainActor
 final class CloudLibraryStore: ObservableObject {
@@ -24,6 +25,8 @@ final class CloudLibraryStore: ObservableObject {
     private var listedQuery = ""
     private var listedScope = "all"
     private let api: any CloudLibraryAPI
+    private let coverCache = NSCache<NSString, UIImage>()
+    private var coverGeneration = 0
     private var pendingDetails: [String: Task<CloudDetail, Error>] = [:]
     private let files: CloudFileStore
     private final class WeakStore { weak var value: CloudLibraryStore?; init(_ value: CloudLibraryStore) { self.value = value } }
@@ -60,6 +63,7 @@ final class CloudLibraryStore: ObservableObject {
             items = append ? items + result.items.filter { new in !items.contains(where: { $0.id == new.id }) } : result.items
             try? await files.cacheCatalog(items)
             offline = false
+            notice = (result.warnings?.isEmpty == false) ? "情報を検証できない資料が\(result.warnings!.count)版あります。他の資料は閲覧できます。" : nil
             listedQuery = query; listedScope = scope
             nextCursor = append && result.nextCursor == nextCursor ? nil : result.nextCursor; saved = try await files.records(); errorMessage = nil
         } catch {
@@ -161,9 +165,14 @@ final class CloudLibraryStore: ObservableObject {
         let documents = (items + localDiagrams + saved.map(\.diagram) + collections.flatMap(\.members)).map(document).filter { seen.insert($0.id).inserted }
         return SyncLabSession(directory: await files.syncLabDirectory(), seed: seed, documents: documents)
     }
-    func createFolder(_ name: String, parentID: UUID? = nil, shelf: LibraryShelf? = nil) async -> Bool {
+    func createFolder(_ name: String, parentID: UUID? = nil, shelf: LibraryShelf? = nil, documentIDs: Set<String> = []) async -> Bool {
         guard testSync?.blocksLibraryEdits != true else { errorMessage = "同期の確認・復元処理中です。同期画面で完了または解除してから編集してください。"; return false }
-        do { organization = try await files.createFolder(name: name, parentID: parentID, shelf: shelf); await testSync?.captureLibraryChanges(); return true }
+        do {
+            let known = Set((items + localDiagrams + saved.map(\.diagram) + collections.flatMap(\.members)).map { $0.id.lowercased() })
+            guard documentIDs.isSubset(of:known) else { throw CloudError.invalidResponse }
+            organization = try await files.createFolder(name:name,parentID:parentID,shelf:shelf,documentIDs:documentIDs)
+            collections = try await files.collections(); await testSync?.captureLibraryChanges(); return true
+        }
         catch { errorMessage = message(error); return false }
     }
     func moveDocuments(_ ids: Set<String>, to folderID: UUID?, scoped: Bool = false) async -> Bool {
@@ -316,13 +325,24 @@ final class CloudLibraryStore: ObservableObject {
         } catch { errorMessage = message(error); return false }
     }
     private func download(_ diagram: CloudDiagram, file: CloudFile) async throws -> Data {
-        for attempt in 0...1 {
+        for attempt in 0...3 {
             do {
+                try Task.checkCancellation()
                 let grant = try await api.access(diagram: diagram, file: file)
                 if cloudDate(grant.expiresAt).map({ $0 <= Date() }) == true { throw CloudError.expiredURL }
                 try grant.validate(file: file)
                 return try await api.download(grant)
-            } catch CloudError.expiredURL { if attempt == 1 { throw CloudError.expiredURL } }
+            } catch CloudError.expiredURL { if attempt == 3 { throw CloudError.expiredURL } }
+            catch let error as SyncRetryFailure {
+                try Task.checkCancellation()
+                let delay = max(Double(attempt + 1),error.retryAfter?.timeIntervalSinceNow ?? 0)
+                guard attempt < 3,delay <= 30 else { throw error }
+                try await Task.sleep(for:.seconds(delay))
+            } catch let error as URLError {
+                try Task.checkCancellation()
+                guard attempt < 3,error.code != .cancelled else { throw error }
+                try await Task.sleep(for:.seconds(Double(attempt + 1)))
+            }
         }
         throw CloudError.expiredURL
     }
@@ -343,6 +363,7 @@ final class CloudLibraryStore: ObservableObject {
     /// A cached cover is not the document's complete set of formats/pages.
     func readingFiles(_ diagram: CloudDiagram, localOnly: Bool = false) async throws -> [CloudFile] {
         if localOnly || offline { return try await localReadingFiles(diagram).filter { $0.format != .svg } }
+        if let cached = try await files.cachedDetail(diagram) { return cached.files.filter { $0.format != .svg } }
         return try await detail(diagram).files.filter { $0.format != .svg }
     }
     func reloadSaved() async {
@@ -402,9 +423,13 @@ final class CloudLibraryStore: ObservableObject {
         do { return opened(try await files.open(record), record: record) }
         catch { errorMessage = message(error); return nil }
     }
+    private func clearCoverCache() {
+        coverGeneration += 1
+        coverCache.removeAllObjects()
+    }
     func clearCache() async {
         guard !busy else { return }
-        do { try await files.clearCache(); localDiagrams = []; if offline { items = [] }; notice = "一時キャッシュを削除しました。保存済み資料は残っています。" }
+        do { try await files.clearCache(); clearCoverCache(); localDiagrams = []; if offline { items = [] }; notice = "一時キャッシュを削除しました。保存済み資料は残っています。" }
         catch { errorMessage = message(error) }
     }
     func clearLocalDocuments() async {
@@ -412,6 +437,7 @@ final class CloudLibraryStore: ObservableObject {
         busy = true; defer { busy = false }
         do {
             try await files.clearLocalDocuments()
+            clearCoverCache()
             saved = []; localDiagrams = []; if offline { items = [] }
             errorMessage = nil; notice = "端末の資料を削除しました。S3の資料は残っています。"
         } catch { await reloadSaved(); errorMessage = message(error) }
@@ -430,10 +456,14 @@ final class CloudLibraryStore: ObservableObject {
     }
     func cachedSlideThumbnail(_ diagram: CloudDiagram, file: CloudFile) async -> UIImage? {
         guard let url = try? await files.localURL(SavedCloudFile(diagram: diagram, file: file)) else { return nil }
-        return UIImage(contentsOfFile: url.path)
+        return await CloudThumbnailRenderer.shared.image(at: url)
     }
 
     func thumbnail(_ diagram: CloudDiagram, offline: Bool) async -> UIImage? {
+        guard lifecycle.status(diagram.id) == .active, !Task.isCancelled else { return nil }
+        let key = "\(diagram.id)-\(diagram.version)-\(offline)" as NSString
+        if let image = coverCache.object(forKey: key) { return image }
+        let generation = coverGeneration
         do {
             let url: URL
             if offline {
@@ -446,10 +476,16 @@ final class CloudLibraryStore: ObservableObject {
                 guard let file = detail.files.first(where: { $0.format == .png && $0.page == 1 }) ?? detail.files.first(where: { $0.format == .pdf }) else { return nil }
                 url = try await localOrDownload(diagram, file: file)
             }
-            if url.pathExtension == "pdf" {
-                return PDFDocument(url: url)?.page(at: 0)?.thumbnail(of: CGSize(width: 420, height: 236), for: .mediaBox)
+            guard !Task.isCancelled else { return nil }
+            let image = await CloudThumbnailRenderer.shared.image(at: url)
+            guard !Task.isCancelled, generation == coverGeneration,
+                  lifecycle.status(diagram.id) == .active else { return nil }
+            if let image, let cg = image.cgImage {
+                coverCache.countLimit = 80
+                coverCache.totalCostLimit = 24 * 1024 * 1024
+                coverCache.setObject(image, forKey: key, cost: cg.bytesPerRow * cg.height)
             }
-            return UIImage(contentsOfFile: url.path)
+            return image
         } catch { return nil }
     }
     private func opened(_ url: URL, record: SavedCloudFile) -> OpenedDocument {
@@ -463,4 +499,30 @@ func preferredCloudFile(_ files: [CloudFile]) -> CloudFile? {
         if let file = files.filter({ $0.format == format }).sorted(by: { $0.page < $1.page }).first { return file }
     }
     return nil
+}
+
+/// Serial worker keeps disk reads, image decoding and PDF rasterization off the main actor.
+actor CloudThumbnailRenderer {
+    static let shared = CloudThumbnailRenderer()
+    static let maximumPixelSize = 640
+
+    func image(at url: URL) -> UIImage? {
+        guard !Task.isCancelled else { return nil }
+        if url.pathExtension.lowercased() == "pdf" {
+            guard let page = PDFDocument(url: url)?.page(at: 0) else { return nil }
+            let bounds = page.bounds(for: .mediaBox)
+            guard bounds.width > 0, bounds.height > 0 else { return nil }
+            let ratio = CGFloat(Self.maximumPixelSize) / max(bounds.width, bounds.height)
+            return page.thumbnail(of: CGSize(width: bounds.width * ratio, height: bounds.height * ratio), for: .mediaBox)
+        }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL,
+            [kCGImageSourceShouldCache: false] as CFDictionary),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: Self.maximumPixelSize,
+                kCGImageSourceShouldCacheImmediately: true
+              ] as CFDictionary) else { return nil }
+        return UIImage(cgImage: image)
+    }
 }

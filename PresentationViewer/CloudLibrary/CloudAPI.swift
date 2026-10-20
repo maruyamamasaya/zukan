@@ -114,7 +114,13 @@ struct MockCloudAPI: CloudLibraryAPI {
 }
 
 /// Short-lived access tokens supplied by PKCE/Keychain or an injected provider.
-protocol CloudAccessTokenProvider: Sendable { func accessToken() async throws -> String }
+protocol CloudAccessTokenProvider: Sendable {
+    func accessToken() async throws -> String
+    func accessToken(forceRefresh: Bool) async throws -> String
+}
+extension CloudAccessTokenProvider {
+    func accessToken(forceRefresh: Bool) async throws -> String { try await accessToken() }
+}
 final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
@@ -148,21 +154,39 @@ struct HTTPSCloudAPI: CloudLibraryAPI {
         session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
     }
     private func request<T: Decodable>(_ path: String, query: [URLQueryItem] = [], body: Data? = nil) async throws -> T {
-        try await Self.requestPacer.wait()
         var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
         components.queryItems = query.isEmpty ? nil : query
-        var request = URLRequest(url: components.url!); request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.httpMethod = body == nil ? "GET" : "POST"; request.httpBody = body
-        request.setValue("Bearer \(try await tokens.accessToken())", forHTTPHeaderField: "Authorization")
-        if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let (bytes, response) = try await session.bytes(for: request)
-        guard let response = response as? HTTPURLResponse else { throw CloudError.invalidResponse }
-        if response.statusCode == 401 { throw CloudError.authentication }
-        guard response.statusCode == 200, response.mimeType == "application/json" else { throw CloudError.unavailable }
-        var data = Data()
-        for try await byte in bytes { if data.count >= 1_000_000 { throw CloudError.invalidResponse }; data.append(byte) }
-        return try JSONDecoder().decode(T.self, from: data)
+        var refreshed = false
+        var forceRefresh = false
+        var retries = 0
+        let retryable = body == nil || path.hasSuffix("/access-url")
+        while true {
+            try Task.checkCancellation()
+            try await Self.requestPacer.wait()
+            var request = URLRequest(url: components.url!); request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.httpMethod = body == nil ? "GET" : "POST"; request.httpBody = body
+            request.setValue("Bearer \(try await tokens.accessToken(forceRefresh: forceRefresh))", forHTTPHeaderField: "Authorization")
+            forceRefresh = false
+            if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+            let data: Data, response: URLResponse
+            do { (data, response) = try await session.data(for: request) }
+            catch {
+                try Task.checkCancellation()
+                guard retryable, retries < 3 else { throw CloudError.unavailable }
+                retries += 1; try await Task.sleep(for: .seconds(Double(retries) + Double.random(in: 0...0.5))); continue
+            }
+            guard let response = response as? HTTPURLResponse, data.count <= 1_000_000 else { throw CloudError.invalidResponse }
+            if response.statusCode == 401 && !refreshed { refreshed = true; forceRefresh = true; continue }
+            if response.statusCode == 401 || response.statusCode == 403 { throw CloudError.authentication }
+            if retryable && (response.statusCode == 429 || response.statusCode >= 500), retries < 3 {
+                let delay = max(Double(retries + 1), SyncRetryFailure.retryDate(response.value(forHTTPHeaderField: "Retry-After"), now: Date())?.timeIntervalSinceNow ?? 0)
+                if delay <= 30 { retries += 1; try await Task.sleep(for: .seconds(delay + Double.random(in: 0...0.5))); continue }
+            }
+            guard response.statusCode == 200, response.mimeType == "application/json" else { throw CloudError.unavailable }
+            return try JSONDecoder().decode(T.self, from: data)
+        }
     }
+
     func monthlyBilling() async throws -> MonthlyBillingReply {
         let value: MonthlyBillingReply = try await request("v1/monthly-billing")
         try value.validate()
@@ -235,6 +259,9 @@ struct HTTPSCloudAPI: CloudLibraryAPI {
         let (bytes, response) = try await session.bytes(from: grant.url)
         guard let response = response as? HTTPURLResponse else { throw CloudError.invalidResponse }
         if response.statusCode == 403 { throw CloudError.expiredURL }
+        if response.statusCode == 429 || response.statusCode >= 500 {
+            throw SyncRetryFailure(retryAfter:SyncRetryFailure.retryDate(response.value(forHTTPHeaderField:"Retry-After"),now:Date()))
+        }
         guard response.statusCode == 200, response.mimeType == grant.contentType else { throw CloudError.unavailable }
         var data = Data()
         for try await byte in bytes { if data.count >= grant.sizeBytes { throw CloudError.integrity }; data.append(byte) }
