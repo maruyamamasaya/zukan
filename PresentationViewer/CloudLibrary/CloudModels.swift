@@ -68,7 +68,8 @@ enum CloudArtifactSizePolicy {
         if file.sizeBytes < 20_000_000 { return true }
         return diagram.type == "presentation" &&
             ((diagram.id.lowercased() == diagramID && diagram.pageCount == 40) ||
-             (diagram.id.lowercased() == "e64e2471-56b8-4583-bc89-45e549053c22" && diagram.pageCount == 22)) && LibraryArtifactPolicy.allows(name: file.name,
+             (diagram.id.lowercased() == "e64e2471-56b8-4583-bc89-45e549053c22" && diagram.pageCount == 22) ||
+             (diagram.id.lowercased() == "df564633-2ea8-4451-9646-33a22136b7a1" && diagram.pageCount == 83)) && LibraryArtifactPolicy.allows(name: file.name,
             size: file.sizeBytes, hash: file.sha256, id: diagram.id, version: diagram.version) &&
             approvedLargeFile(name: file.name, sizeBytes: file.sizeBytes, sha256: file.sha256, contentType: file.contentType)
     }

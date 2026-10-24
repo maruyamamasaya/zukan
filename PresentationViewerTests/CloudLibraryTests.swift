@@ -971,6 +971,15 @@ final class CloudLibraryTests: XCTestCase {
             }
         }
     }
+    func testMusicHistoryCapacityApprovalRejectsDifferentDocumentAndPageCount() throws {
+        let id = "df564633-2ea8-4451-9646-33a22136b7a1"
+        let file = CloudFile(name: "document.pdf", format: .pdf, sizeBytes: 34_040_605, sha256: "893dee3873a7a85bc80c42eac254d02459ac3ef2edab328bcb53125fff1d52d4", contentType: CloudFormat.pdf.mime)
+        for (candidate, version, pages, accepted) in [(id, 1, 83, true), (id, 2, 83, false), (id, 1, 82, false), (UUID().uuidString, 1, 83, false)] {
+            let diagram = CloudDiagram(id: candidate, title: "Music history", type: "presentation", version: version, formats: [.png, .pdf, .pptx], pageCount: pages, tags: [])
+            if accepted { XCTAssertNoThrow(try file.validate(for: diagram)) }
+            else { XCTAssertThrowsError(try file.validate(for: diagram)) }
+        }
+    }
     func testApprovedLargePDFCacheSaveAndOfflineReopen() async throws {
         let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("outputs/large-presentation-fixture/document.pdf")
         guard FileManager.default.fileExists(atPath: fixture.path) else { throw XCTSkip("Optional real 40-page PDF fixture not installed") }
